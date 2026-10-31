@@ -1,0 +1,19 @@
+{
+  "hand": ["AH", "KH", "9H", "7H", "4H", "QS", "QC", "2D"],
+  "jokers": [
+    {"name": "Blueprint"},
+    {"name": "Droll Joker"},
+    {"name": "Joker", "edition": "foil"},
+    {"name": "Green Joker", "vars": {"mult": 6}}
+  ],
+  "joker_slots": 5,
+  "hand_levels": {"Flush": 3, "Pair": 2},
+  "hands_left": 3,
+  "discards_left": 2,
+  "hand_size": 8,
+  "blind": "Big Blind",
+  "blind_chips": 4500,
+  "score": 1200,
+  "money": 14,
+  "consumables": ["Jupiter"]
+}

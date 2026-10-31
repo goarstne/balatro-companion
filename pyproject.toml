@@ -1,0 +1,16 @@
+[project]
+name = "balatro-companion"
+version = "0.2.0"
+description = "Score engine, strategy advisor and live autopilot for Balatro (vanilla 1.0.1)"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["numpy", "opencv-python", "pillow"]
+
+[project.optional-dependencies]
+claude = ["anthropic"]  # only for --vision claude / auto with ANTHROPIC_API_KEY
+
+[tool.setuptools]
+packages = ["balatro", "balatro.jokers", "balatro.localvision"]
+
+[tool.setuptools.package-data]
+balatro = ["ui/*.qml"]

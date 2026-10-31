@@ -1,0 +1,16 @@
+{
+  "hand": ["KS", "KD", "KC", "8S", "8H", "5C", "3D", "JH"],
+  "jokers": [
+    {"name": "Sly Joker"},
+    {"name": "Jolly Joker"},
+    {"name": "Ride the Bus", "vars": {"mult": 9}},
+    {"name": "Cavendish", "edition": "poly"}
+  ],
+  "hand_levels": {"Full House": 2, "Three of a Kind": 2},
+  "hands_left": 4,
+  "discards_left": 3,
+  "blind": "The Flint",
+  "blind_chips": 22000,
+  "score": 0,
+  "money": 9
+}

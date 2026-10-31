@@ -1,0 +1,16 @@
+{
+  "phase": "shop",
+  "hand": [],
+  "jokers": [],
+  "joker_slots": 5,
+  "money": 12,
+  "ante": 1,
+  "reroll_cost": 5,
+  "shop": [
+    {"kind": "joker", "name": "Spare Trousers", "price": 6, "edition": null},
+    {"kind": "joker", "name": "Joker", "price": 8, "edition": "holo"},
+    {"kind": "voucher", "name": "Grabber", "price": 10, "edition": null},
+    {"kind": "booster_pack", "name": "Buffoon Pack", "price": 4, "edition": null},
+    {"kind": "booster_pack", "name": "Standard Pack", "price": 4, "edition": null}
+  ]
+}

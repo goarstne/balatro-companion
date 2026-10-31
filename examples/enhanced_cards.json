@@ -1,0 +1,25 @@
+{
+  "hand": [
+    {"rank": "Q", "suit": "D", "enhancement": "glass"},
+    {"rank": "Q", "suit": "S", "seal": "red"},
+    {"rank": "10", "suit": "C", "enhancement": "bonus", "edition": "foil"},
+    {"rank": "K", "suit": "H", "enhancement": "steel"},
+    {"rank": "K", "suit": "C", "enhancement": "steel", "seal": "red"},
+    {"rank": "A", "suit": "S", "enhancement": "stone"},
+    {"rank": "7", "suit": "H", "enhancement": "lucky", "seal": "gold"},
+    {"rank": "4", "suit": "D", "enhancement": "mult", "edition": "holo"}
+  ],
+  "jokers": [
+    {"name": "Baron"},
+    {"name": "Mime", "edition": "negative"},
+    {"name": "Scary Face"}
+  ],
+  "hands_left": 2,
+  "discards_left": 1,
+  "blind": "The Goad",
+  "blind_chips": 11000,
+  "score": 3800,
+  "money": 23,
+  "vouchers": ["Observatory"],
+  "consumables": ["Saturn"]
+}
