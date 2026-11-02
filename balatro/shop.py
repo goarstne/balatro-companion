@@ -9,6 +9,7 @@ import random
 from dataclasses import asdict, dataclass, replace
 
 from .data import PLANETS
+from .engine import PASSIVE
 from .jokers.part_b import _sell_value
 from .models import Joker
 from .optimizer import _best_score
@@ -16,7 +17,7 @@ from .optimizer import _best_score
 TIER_POINTS = {"S": 10, "A": 7, "B": 5, "C": 3, "D": 1}
 _TIERS = {
     "S": "Blueprint, Brainstorm, Triboulet, Yorick, Perkeo, Canio, Baron, Cavendish, Hologram, Vampire, "
-         "Campfire, The Family, The Order, Photograph, Hanging Chad, Mime, DNA, Baseball Card, "
+         "Campfire, The Family, The Order, Photograph, Hanging Chad, Mime, Baseball Card, "
          "Chicot",
     "A": "Bloodstone, Spare Trousers, Constellation, Card Sharp, The Duo, The Trio, The Tribe, Ancient Joker, The Idol, "
          "Sock and Buskin, Hack, Steel Joker, Hiker, Obelisk, Lucky Cat, Throwback, Ride the Bus, Green Joker, "
@@ -34,7 +35,8 @@ _TIERS = {
          "Crazy Joker, Sly Joker, Wily Joker, Clever Joker, Devious Joker, Crafty Joker, Banner, Mystic Summit, "
          "8 Ball, Chaos the Clown, Egg, Burglar, Blue Joker, Sixth Sense, Faceless Joker, Superposition, "
          "To Do List, Red Card, Séance, Riff-Raff, Splash, Luchador, Gift Card, Reserved Parking, "
-         "Mail-In Rebate, Hallucination, Golden Ticket, Diet Cola, Certificate, Astronomer, Credit Card",
+         "Mail-In Rebate, Hallucination, Golden Ticket, Diet Cola, Certificate, Astronomer, Credit Card, "
+         "DNA",  # never triggered: the autopilot doesn't open rounds with 1 card (run 201325 Z29-128: dead slot)
     "D": "Troubadour, Matador",
 }
 TIER = {name.strip(): t for t, names in _TIERS.items() for name in names.split(",")}
@@ -126,10 +128,10 @@ def evaluate(state, items, samples=40, seed=0, auto=False):
         if kind == "joker":
             ed = it.get("edition")
             fits = free > 0 or ed == "negative"
-            gain = _best_with_joker(base_state, Joker(name, edition=ed), hands, reorder=not auto) / base - 1
+            gain = _best_with_joker(base_state, Joker(name, edition=ed), hands, reorder=not auto or state.telemetry) / base - 1
             tier = TIER.get(name, "C")
             # Blueprint lands rightmost; with no slot left behind it, nothing can ever sit to its right
-            dead_bp = auto and name == "Blueprint" and free - (ed != "negative") <= 0
+            dead_bp = auto and not state.telemetry and name == "Blueprint" and free - (ed != "negative") <= 0
             if dead_bp:
                 tier = "D"
             # ponytail: value = tier + capped immediate gain; tune weights against real runs
@@ -170,14 +172,18 @@ def _owned_joker_value(state, idx, ante, hands):
     without = _avg_best(replace(base_state, jokers=state.jokers[:idx] + state.jokers[idx + 1:]), hands) or 1
     gain = max(0.0, with_all / without - 1)
     tier = TIER.get(j.name, "C")
+    other_state = replace(state, jokers=state.jokers[:idx] + state.jokers[idx + 1:])
+    syn_d, _ = strategy.joker_synergy(other_state, j.name, ante)
+    # a passive joker's whole effect is in the simulation: +0% means a dead slot, not its tier (run 20261101-203240
+    # Z60-215: Oops! All 6s without a probability joker kept Tier A, Photograph/Blackboard/Stuntman left in the shop)
+    if j.name in PASSIVE and j.name != "Chicot" and gain < 0.01 and syn_d <= 0:
+        tier = "C"
     val = TIER_POINTS[tier] + min(gain * 4, 4) + {"poly": 2, "holo": 1, "foil": 0.5, "negative": 3}.get(j.edition, 0)
     role = strategy.joker_role(j.name)
     if role:
         val += strategy.ROLE_BONUS[strategy._phase(ante)][role]
     if j.name in strategy.HAND_JOKERS.get(strategy.focus_hand(state), ()):
         val += 2
-    other_state = replace(state, jokers=state.jokers[:idx] + state.jokers[idx + 1:])
-    syn_d, _ = strategy.joker_synergy(other_state, j.name, ante)
     val += syn_d
     val += min(3.0, j.vars.get("mult", 0) / 8 + j.vars.get("chips", 0) / 40
                + max(0.0, j.vars.get("xmult", 1) - 1) * 2 + max(0.0, j.vars.get("x", 1) - 1) * 2)
@@ -210,6 +216,15 @@ def _horizon(ante):
     return min(1.0, max(0.0, (9 - ante) / 5))
 
 
+def _need_this_ante(state, ante):
+    """Hardest blind left this ante; in the shop the upcoming boss counts (The Wall 4x: run 20261101-081407
+    Z99 sold Blue Joker for Ride the Bus, -54%/hand, checked against 10,000 instead of 20,000, then lost)."""
+    from . import strategy
+    boss = next((b for b in (state.blind, state.upcoming_boss) if b in strategy.BLIND_MULT), "boss")
+    return max(strategy.required_score(ante, "big", state), strategy.required_score(ante, boss, state),
+               state.blind_chips)
+
+
 def _lost_steps(state, money, net_cost, ante):
     from . import strategy
     cap = strategy.interest_cap(state)
@@ -233,6 +248,10 @@ def _min_buy_value(state, offer, money, net_cost, ante, est, need_curr, need_nex
     if offer.kind == "tarot" and offer.name in ("The Hermit", "Temperance") and offer.value >= 6.0:
         return 5.0
     if offer.kind == "voucher" and not weak:
+        # rated down by the run context: idle money only (run 20261101-203240 Z85 Wasteful "build avoids
+        # discards" next to Green Joker, $13 -> $8; Crystal Ball "enough consumable slots" in 194150/105644)
+        if offer.value < VOUCHER_POINTS.get(offer.name, 3) and money - net_cost < cap * 5:
+            return 99.0
         # permanent effect: money above the interest cap is idle, and the $10 price is regained in a few rounds
         return 2.0 if lost_steps == 0 else 5.0 + 0.5 * lost_steps
     if weak:
@@ -279,7 +298,9 @@ def _reroll_goal(state, ante, est, need_curr, free_jokers, free_cons, money, rer
         return f"look for a counter or instant score against {state.blind}"
     if weak and (free_jokers > 0 or can_replace):
         return f"look for a scoring joker for ante {ante} (~{est:,.0f}/{need_curr:,} points)"
-    if ante >= 4 and not (owned & strategy.XMULT) and (free_jokers > 0 or cands):
+    # can_replace, not cands: five flat +mult jokers are never tier C/D, so cands stayed empty and the money went
+    # to planet rerolls instead (runs 201325/081407 lost at A4 with $40-48; 112941 A5 $49, zero xMult)
+    if ante >= 4 and not (owned & strategy.XMULT) and (free_jokers > 0 or can_replace):
         return "look for an xMult joker for higher antes"
     if ante <= 4 and not (owned & strategy.SCALING) and free_jokers > 0:
         return "look for a scaling joker to build up"
@@ -288,7 +309,8 @@ def _reroll_goal(state, ante, est, need_curr, free_jokers, free_cons, money, rer
     if cands:
         idx, _ = cands[0]
         return f"look for a better joker to replace {state.jokers[idx].name}"
-    if free_cons > 0 and money - reroll_cost >= floor + 5:
+    # planet rerolls without a clear focus returned ~0 (learnings: 7 runs, 105644 ~$110 for one Uranus at +0%)
+    if free_cons > 0 and money - reroll_cost >= floor + 5 and strategy.has_clear_focus(state):
         return f"look for a planet for the focus hand ({strategy.focus_hand(state)}) or a tarot"
     return None
 
@@ -316,10 +338,8 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
     for o in offers:
         if o.idx in bought_indices or o.kind == "playing_card":
             continue
-        est = strategy.estimate_round(sim, samples=min(samples, 20))
-        need_curr = max(strategy.required_score(ante, "big", sim),
-                        strategy.required_score(ante, sim.blind if sim.blind in strategy.BLIND_MULT else "boss", sim),
-                        sim.blind_chips)
+        est = strategy.estimate_round(sim, samples=min(samples, 20), boss=sim.upcoming_boss)
+        need_curr = _need_this_ante(sim, ante)
         need_next = strategy.next_ante_score(sim, ante, "big")
         item = items[o.idx]
         ed = item.get("edition")
@@ -364,24 +384,43 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
                             if not j.eternal and j.edition != "negative" and joker_orig_idx[k] >= 0]
                 if not sellable:
                     continue
-                k_weak, v_weak = min(sellable, key=lambda t: t[1])
+                # swap target: the owned joker whose replacement scores best, among those the value rule allows
+                # (eff_val <= value + 2). The lowest-valued joker alone was Banner at Z293 of run 20261101-212446:
+                # -42% for Smiley Face while Rocket/Half Joker would have given +39%/+21%; ~$60 rerolled instead
+                base = _avg_best(_sim_state(sim), hands) or 1
+                swaps = [(_avg_best(replace(_sim_state(sim), jokers=sim.jokers[:k] + sim.jokers[k + 1:]
+                                            + [Joker(o.name, edition=ed)]), hands) / base - 1, k, v)
+                         for k, v in sellable if v <= o.value]
+                if not swaps:
+                    continue
+                rep_gain, k_weak, v_weak = max(swaps)
                 j_weak = sim.jokers[k_weak]
                 sv = _sell_value(j_weak)
                 if money + sv < o.price:
                     continue
-                # Re-evaluate candidate score gain when actually replacing j_weak
                 rep_jokers = sim.jokers[:k_weak] + sim.jokers[k_weak + 1:] + [Joker(o.name, edition=ed)]
-                rep_gain = _avg_best(replace(_sim_state(sim), jokers=rep_jokers), hands) / (
-                    _avg_best(_sim_state(sim), hands) or 1) - 1
                 eff_val = max(o.value, o.value + min(rep_gain * 2, 2))
                 net_cost = max(0, o.price - sv)
                 lost = _lost_steps(sim, money, net_cost, ante)
                 if eff_val < max(v_weak + 2.0, 5.0 + 1.0 * lost):
                     continue
+                # a joker that doesn't scale or earn shows its whole effect in the simulation: scoring less after
+                # the swap never pays off (runs 094338 Z82 Half Joker -> Seeing Double -11%, 105644 Z168 Abstract
+                # Joker -> Smeared Joker -16% with Two Pair focus, dead slot until sold at Z239)
+                if rep_gain < -0.05 and o.name not in strategy.SCALING | strategy.ECON:
+                    continue
+                # Vampire scales only on enhanced cards: judge it at the xMult the deck can feed (run 20261101-205435
+                # Z320: Odd Todd sold for Vampire at -35%, 3 enhanced cards in the deck, stuck at x1.3 to the end)
+                if o.name == "Vampire" and rep_gain < -0.05:
+                    fed = rep_jokers[:-1] + [Joker(o.name, edition=ed, vars={
+                        "xmult": 1 + 0.1 * sum(1 for c in deck if c.enhancement)})]
+                    if _avg_best(replace(_sim_state(sim), jokers=fed), hands) / (
+                            _avg_best(_sim_state(sim), hands) or 1) < 0.95:
+                        continue
                 # eff_val ignores a score loss; a swap must not leave the next blind short (run 20261031-091942
                 # Z230: Abstract Joker sold for a fresh Obelisk before The Club, est ~21,021/22,000, lost)
                 if rep_gain < 0 and strategy.estimate_round(replace(sim, jokers=rep_jokers),
-                                                            samples=min(samples, 20)) < need_curr * 1.15:
+                                                            samples=min(samples, 20), boss=sim.upcoming_boss) < need_curr * 1.15:
                     continue
                 # after the sale the replan sees a free slot: the buy must pass that rule too, else
                 # the joker is sold and the replacement left in the shop (run 20261031-082933 Z80/81)
@@ -390,7 +429,9 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
                     continue
                 orig_k = joker_orig_idx[k_weak]
                 clean_why = o.why.replace(", no free slot", "")
-                actions.append(ShopAction("sell", orig_k, f"sell {j_weak.name} (+${sv}) for {o.name}"))
+                # net of what the sold joker contributed: 200×20 → 120×40 is +20 %, not ×2
+                actions.append(ShopAction("sell", orig_k, f"sell {j_weak.name} (+${sv}) for {o.name}: "
+                                                          f"{rep_gain:+.0%} score/hand after the swap"))
                 actions.append(ShopAction("buy", o.idx, f"{o.name} (${o.price}): {clean_why}"))
                 money = money + sv - o.price
                 sim.jokers = rep_jokers
@@ -412,10 +453,8 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
     # Consider a reroll only when no booster pack was just bought and a concrete target + budget exist
     bought_pack = any(a.kind == "buy" and items[a.index]["kind"] == "booster_pack" for a in actions)
     if not bought_pack:
-        est = strategy.estimate_round(sim, samples=min(samples, 20))
-        need_curr = max(strategy.required_score(ante, "big", sim),
-                        strategy.required_score(ante, sim.blind if sim.blind in strategy.BLIND_MULT else "boss", sim),
-                        sim.blind_chips)
+        est = strategy.estimate_round(sim, samples=min(samples, 20), boss=sim.upcoming_boss)
+        need_curr = _need_this_ante(sim, ante)
         weakest = None
         if free <= 0 and reroll_cost is not None:
             weakest = min((_owned_joker_value(sim, k, ante, hands) for k, j in enumerate(sim.jokers)
@@ -462,12 +501,12 @@ def offers_for(state, items, ante=None, samples=40, auto=False):
     return strategy.adjust_offers(state, offers, ante) if ante else offers
 
 
-def advise(state, items, phase="shop", reroll_cost=None, samples=40, ante=None, details=None):
+def advise(state, items, phase="shop", reroll_cost=None, samples=40, ante=None, details=None, auto=False):
     """-> text: what to buy/sell/reroll (shop) or which card to take (opened booster pack).
     In shop phase, recommendations are built directly from shop_plan()."""
     from . import strategy
     eval_state = replace(state, consumables=[]) if phase == "booster_pack" else state
-    offers = offers_for(eval_state, items, ante, samples)
+    offers = offers_for(eval_state, items, ante, samples, auto=auto)
     if details is not None:
         details["offers"] = [asdict(o) for o in offers]
     lines = []
@@ -475,7 +514,7 @@ def advise(state, items, phase="shop", reroll_cost=None, samples=40, ante=None, 
         best = next((o for o in offers if o.buyable), None)
         lines.append(f"RECOMMENDATION: Take {best.name} ({best.why})" if best else "RECOMMENDATION: Skip")
     else:
-        plan = shop_plan(state, items, ante or 1, reroll_cost=reroll_cost, samples=samples)
+        plan = shop_plan(state, items, ante or 1, reroll_cost=reroll_cost, samples=samples, auto=auto)
         if details is not None:
             details["shop_actions"] = [asdict(a) for a in plan]
         steps = [a for a in plan if a.kind != "leave"]

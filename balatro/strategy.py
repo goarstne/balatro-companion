@@ -23,6 +23,13 @@ BLIND_MULT = {"small": 1, "Small Blind": 1, "big": 1.5, "Big Blind": 1.5,
               "boss": 2, "The Wall": 4, "Violet Vessel": 6, "The Needle": 1}
 
 
+def _stake_table(state):
+    stake = state.stake
+    if isinstance(stake, int):
+        stake = ("white", "red", "green", "black", "blue", "purple", "orange", "gold")[max(0, min(7, stake - 1))]
+    return STAKE_BASE.get(str(stake).lower().removesuffix(" stake"), ANTE_BASE)
+
+
 def _table_base(ante, table=ANTE_BASE):
     if ante < 1:
         return 100
@@ -39,9 +46,11 @@ def required_score(ante, blind="small", base=None, *, stake=None, blind_chips=0)
     mult = BLIND_MULT.get(blind, 2)
     if isinstance(arg, State):
         plasma = 2 if (arg.deck_type or "").startswith("Plasma") else 1
+        if arg.stake is not None:
+            return int(_table_base(ante, _stake_table(arg)) * plasma * mult)
         if arg.blind_chips > 0:
             return int(round(arg.blind_chips / (BLIND_MULT.get(arg.blind, 1) if arg.blind else 1) * mult))
-        return int(_table_base(ante) * plasma * mult)
+        return int(_table_base(ante, _stake_table(arg)) * plasma * mult)
     if isinstance(arg, str):
         return int(_table_base(ante, STAKE_BASE.get(arg.lower().removesuffix(" stake"), ANTE_BASE)) * mult)
     if isinstance(arg, (int, float)) and arg > 0:
@@ -53,6 +62,8 @@ def next_ante_score(state, ante, blind="big"):
     """Required score in `ante + 1`, inferred from `state.blind_chips` (stake/Plasma scaling) when known."""
     plasma = 2 if (state.deck_type or "").startswith("Plasma") else 1
     mult = BLIND_MULT.get(blind, 2)
+    if state.stake is not None:
+        return int(_table_base(ante + 1, _stake_table(state)) * plasma * mult)
     if state.blind_chips > 0 and ante >= 1:
         obs_base = state.blind_chips / (BLIND_MULT.get(state.blind, 1) if state.blind else 1)
         if 1 <= ante <= 8:
@@ -60,7 +71,7 @@ def next_ante_score(state, ante, blind="big"):
                 if round(obs_base) == table[ante - 1] * plasma:
                     return int(_table_base(ante + 1, table) * plasma * mult)
         return int(round(_table_base(ante + 1) * (obs_base / _table_base(ante)) * mult))
-    return int(_table_base(ante + 1) * plasma * mult)
+    return int(_table_base(ante + 1, _stake_table(state)) * plasma * mult)
 
 
 HAND_JOKERS = {
@@ -102,13 +113,82 @@ SKIP_TAG_MIN = 7
 SKIP_SAFETY = 1.2
 
 
-def estimate_round(state, samples=20, seed=0):
+def leaf_sale(state, ante=8):
+    from .shop import _owned_joker_value
+    rng = random.Random(0)
+    deck = state.get_full_deck()
+    hands = [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(8)]
+    return min((i for i, j in enumerate(state.jokers) if not j.eternal),
+               key=lambda i: _owned_joker_value(state, i, ante, hands), default=None)
+
+
+def boss_state(state, boss):
+    """Fresh-round resources for a known boss; the engine applies its scoring restrictions."""
+    disabled = state.boss_disabled and state.blind == boss or any(j.name == "Chicot" and not j.debuff for j in state.jokers)
+    hands = state.round_hands if state.round_hands is not None else max(1, state.hands_left or 4)
+    discards = state.round_discards if state.round_discards is not None else state.discards_left
+    size = state.hand_size
+    jokers = state.jokers
+    if boss == "Verdant Leaf" and not disabled:
+        sale = leaf_sale(state)
+        if sale is not None:
+            jokers = state.jokers[:sale] + state.jokers[sale + 1:]
+            disabled = True
+    if not disabled:
+        hands = 1 if boss == "The Needle" else hands
+        discards = 0 if boss == "The Water" else discards
+        if boss == "The Manacle" and state.blind != boss:
+            size = max(1, size - 1)
+    deck = [replace(c, debuff=False, forced=False, face_down=False) for c in state.get_full_deck()]
+    return replace(state, hand=[], full_deck=deck, deck=None, blind=boss, boss_disabled=disabled,
+                   hands_left=hands, discards_left=discards, hand_size=size, score=0, round_hand_types=[],
+                   discards_used=0, jokers=jokers)
+
+
+def estimate_round(state, samples=20, seed=0, boss=None):
     """Rough round score: avg best single hand from random draws x hands per round (no discards)."""
     rng = random.Random(seed)
-    deck = state.get_full_deck()
-    sim = replace(state, blind=None, blind_chips=0, score=0, deck=None)
-    hands = [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(samples)]
-    return (sum(_best_score(replace(sim, hand=h)) for h in hands) / samples) * max(1, state.hands_left or 4)  # ponytail: ignores discards/boss
+    sim = boss_state(state, boss) if boss else replace(state, blind=None, blind_chips=0, score=0, deck=None)
+    deck = sim.get_full_deck()
+    hands = [rng.sample(deck, min(sim.hand_size, len(deck))) for _ in range(samples)]
+    return (sum(_best_score(replace(sim, hand=h)) for h in hands) / samples) * max(1, sim.hands_left or 4)  # shortcut: cheap estimate ignores redraws; use boss_forecast for full rounds.
+
+
+def boss_forecast(state, ante=1, samples=12, seed=0):
+    """Simulate fresh rounds against the known boss, with actual restrictions and redraws."""
+    from .data import BOSSES
+    from .optimizer import _draw, _round_total
+    boss = state.upcoming_boss or state.blind
+    if boss not in BOSSES:
+        return {"boss": None, "notes": ["No upcoming boss known."]}
+    prepared = boss_state(state, boss)
+    target = required_score(ante, boss, state)
+    totals = []
+    for n in range(samples):
+        rng = random.Random(seed + n)
+        deck = rng.sample(prepared.get_full_deck(), len(prepared.get_full_deck()))
+        sim = replace(prepared, blind_chips=target)
+        totals.append(_round_total(sim, *_draw([], deck, sim), sim.hands_left, sim.discards_left, target, rng=rng))
+    notes = [BOSSES[boss]]
+    if boss == "Verdant Leaf" and len(prepared.jokers) < len(state.jokers):
+        sale = leaf_sale(state, ante)
+        notes.append(f"Plan assumes selling {state.jokers[sale].name} during the blind to remove the debuff.")
+    counters = {"The Plant": "Build a scoring line without face cards, or disable the boss with Luchador/Chicot.",
+                "The Needle": "Save Glass cards and scoring consumables for the single hand.",
+                "Verdant Leaf": "Keep a sellable joker; selling it during this blind removes the debuff.",
+                "The Water": "Prepare a reliable first draw; there are no discards.",
+                "The Eye": "Keep multiple viable hand types; repeated types score zero.",
+                "The Mouth": "Choose the first hand type carefully; later hands must match it.",
+                "The Manacle": "Prioritise hand-size vouchers and hands that need fewer cards."}
+    if boss in counters:
+        notes.append(counters[boss])
+    uncertain = boss in {"Crimson Heart", "Amber Acorn", "The House", "The Wheel", "The Fish", "The Mark", "Cerulean Bell"}
+    if uncertain:
+        notes.append("Estimate uses visible-state scoring; future hidden cards, shuffles or random joker disables are not modelled.")
+    return {"boss": boss, "target": target, "p_win": sum(t >= target for t in totals) / len(totals),
+            "expected": sum(totals) / len(totals), "samples": samples, "approximate": uncertain,
+            "notes": notes, "baseline": estimate_round(state, samples=samples),
+            "boss_estimate": estimate_round(state, samples=samples, boss=boss)}
 
 
 def _tag_points(tag, state_or_money, ante=1):
@@ -148,13 +228,16 @@ def blind_choice(state, ante, blind, tag=None):
     pts, cost = _tag_points(tag, state, ante), _skip_cost(state, ante, blind)
     if pts < max(SKIP_TAG_MIN - 1, cost):
         return "play", f"{tag} (value {pts}/10) doesn't outweigh the lost shop/interest/scaling (cost {cost:.1f})."
-    nxt = "big" if blind in ("small", "Small Blind") else "boss"
+    # skipping the Big Blind leads straight to the known boss (run 20261101-105644 Z387: The Wall 440,000, not 220,000)
+    boss = state.upcoming_boss if state.upcoming_boss in BLIND_MULT else "boss"
+    nxt, label = ("big", "Big Blind") if blind in ("small", "Small Blind") else \
+        (boss, "Boss Blind" if boss == "boss" else boss)
     need, est = required_score(ante, nxt, state), estimate_round(state)
     if est < need * SKIP_SAFETY and tag != "Boss Tag":
         return "play", (f"{tag} would be nice, but the deck only makes ~{est:,.0f} of "
-                        f"{need:,} for the {nxt.capitalize()} Blind – better play and get stronger.")
+                        f"{need:,} for the {label} – better play and get stronger.")
     return "skip", (f"Skip for {tag} (value {pts}/10 ≥ cost {cost:.1f}): the deck makes ~{est:,.0f}, "
-                    f"{need:,} needed for the {nxt.capitalize()} Blind.")
+                    f"{need:,} needed for the {label}.")
 
 
 def blind_decision(d, state):
@@ -241,6 +324,13 @@ def joker_synergy(state, name, ante=1):
         delta, notes = delta - 3.0, notes + ["conflicts with Ride the Bus"]
     if (state.deck_type or "").startswith("Abandoned") and "Pareidolia" not in owned and name in FACE_JOKERS:
         delta, notes = delta - 4.0, notes + ["no face cards in the Abandoned Deck"]
+    if name == "Madness":
+        # destroys a random other non-eternal joker at every Small/Big Blind (card.lua); run 20261101-094338
+        # Z91-405 lost 11 jokers to it, incl. Vampire, Baseball Card, Hologram, Hanging Chad
+        # ponytail: flat -2 per S/A joker at risk, at most 2 (one ante = 2 kills); not the exact expected loss
+        risk = sum(1 for j in state.jokers if not j.eternal and TIER.get(j.name) in ("S", "A"))
+        if risk:
+            delta, notes = delta - 2.0 * min(risk, 2), notes + [f"destroys jokers ({risk} strong at risk)"]
     if name in owned and name in {"Four Fingers", "Shortcut", "Smeared Joker", "Pareidolia", "Splash"}:
         delta, notes = delta - 5.0, notes + ["passive effect already active"]
     if state.blind in ("The Plant", "The Wall", "Violet Vessel", "The Eye", "Verdant Leaf") and name in ("Luchador", "Chicot", "Mr. Bones"):
@@ -409,17 +499,15 @@ def economy_note(money, ante, state=None):
 
 
 def sell_candidates(state, ante):
-    """-> [(joker index, reason)] of jokers that are weak for the current phase, weakest first."""
-    focus, phase, out = focus_hand(state), _phase(ante), []
+    """-> [(joker index, reason)] of weak jokers, weakest first. Phase/role weighting lives in ROLE_BONUS only:
+    a second flat-late/econ-late penalty here counted twice in _owned_joker_value (learnings: tier/role beat the
+    real score gain in 4 runs) - whether a swap pays is shop_plan's score check, not an ante rule."""
+    focus, out = focus_hand(state), []
     for i, j in enumerate(state.jokers):
         if j.eternal:
             continue
-        role, tier = joker_role(j.name), TIER.get(j.name, "C")
-        if role == "flat" and phase == "late":
-            reason = "flat mult/chips joker – too weak from ante 5, make room for xMult/scaling"
-        elif role == "econ" and ante >= 6:
-            reason = "economy joker – this late money hardly helps, score counts"
-        elif tier in "CD" and ante >= 3 and j.name not in HAND_JOKERS.get(focus, ()):
+        tier = TIER.get(j.name, "C")
+        if tier in "CD" and ante >= 3 and j.name not in HAND_JOKERS.get(focus, ()):
             reason = f"tier {tier} unrelated to focus hand {focus}"
         elif j.name in ("Luchador", "Diet Cola") and len(state.jokers) >= state.joker_slots:
             reason = f"{j.name} takes a slot without adding score"

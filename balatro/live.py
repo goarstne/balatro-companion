@@ -90,14 +90,14 @@ def plan(d, auto=False, details=None):
             f"Take {b['cards'][c.index].get('name') or b['cards'][c.index].get('rank', '')}"
         return f"RECOMMENDATION: {pick} – {c.why}\n{b['pack']}: {offered}", None
     if d.get("phase") in ("shop", "booster_pack") and d.get("shop"):
-        return advise(state, d["shop"], d["phase"], d.get("reroll_cost"), ante=d.get("ante"), details=details), None
+        return advise(state, d["shop"], d["phase"], d.get("reroll_cost"), ante=d.get("ante"), details=details, auto=auto), None
     if d.get("phase") == "cash_out":
         return "RECOMMENDATION: Cash Out", None
     if d.get("phase") == "blind_select":
         return blind_advice(d, state), None
     if not state.hand:
         return "No hand cards recognised (menu or animation).", None
-    rec = recommend(state, reorder=not auto)
+    rec = recommend(state, reorder=not auto or bool(d.get("telemetry")))
     return format_recommendation(rec), rec
 
 
@@ -160,20 +160,23 @@ def resume_run(max_age=600):
     return last if moves and not game_over(moves[-1]["state"]) else None
 
 
-def log_move(run, path, state, text, rec, ok, msg):
+def log_move(run, path, state, text, rec, ok, msg, version=None, duration=None):
     """One autopilot move -> runs/<start>/NNN.jpg + a line in moves.jsonl (input for `python -m balatro learn`).
     JPEG q90: ~15x smaller than grim's PNG, the telemetry strip still decodes (tested down to q55)."""
     run.mkdir(parents=True, exist_ok=True)
-    n = sum(1 for _ in run.glob("[0-9][0-9][0-9].*"))
+    log = run / "moves.jsonl"
+    n = sum(1 for line in log.open() if line.strip()) if log.exists() else 0
     Image.open(path).convert("RGB").save(run / f"{n:03d}.jpg", quality=90)
     play = rec.play if rec is not None and rec.action == "play" else None
     entry = {"n": n, "t": datetime.now().isoformat(timespec="seconds"), "state": state, "advice": text,
              "action": rec.action if rec is not None else None,
              "idx": list(rec.play_idx if rec.action == "play" else rec.discard.discard_idx) if rec is not None else None,
              "hand_type": play.hand_type if play else None, "predicted": play.score if play else None,
-             "ok": ok, "msg": msg}
+             "ok": ok, "msg": msg, "duration": duration}
     with open(run / "moves.jsonl", "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    from .runs import record_metadata
+    record_metadata(run, state, version)
 
 
 def analyze(path, model, mode="local", memory=None, pre=None, auto=False, details=None):
@@ -196,10 +199,17 @@ def run(a):
         raise RuntimeError("The widget is an advisor. --hud and --auto can't run together.")
     pilots = []  # the autopilot, created on first use; its Wayland pointer is closed on exit
     try:
-        with tempfile.TemporaryDirectory(prefix="balatro-live-") as tmp:
+        from .control import Control
+        with tempfile.TemporaryDirectory(prefix="balatro-live-") as tmp, \
+                Control(getattr(a, "paused", False)) if a.auto else nullcontext() as control:
+            if a.auto and getattr(a, "retain_days", 30) > 0:
+                from .runs import prune
+                trimmed = prune(days=getattr(a, "retain_days", 30), apply=True)
+                if trimmed["paths"]:
+                    print(f"Retention: removed {len(trimmed['paths'])} old routine artifacts ({trimmed['bytes'] / 1048576:.1f} MiB); logs and evidence kept.")
             from .hud import Hud
             with Hud(Path(tmp)) if getattr(a, "hud", False) else nullcontext() as hud:
-                _loop(a, Path(tmp), pilots, hud)
+                _loop(a, Path(tmp), pilots, hud, control)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
@@ -207,7 +217,7 @@ def run(a):
             p.ptr.close()
 
 
-def _loop(a, tmp, pilots, hud=None):
+def _loop(a, tmp, pilots, hud=None, control=None):
     prev = last_key = seen = None
     fails = {}  # state key -> failed autopilot attempts
     acted = None
@@ -222,9 +232,17 @@ def _loop(a, tmp, pilots, hud=None):
     telemetry = False  # the patched game was seen: a frame without its strip is a stream artefact, not the state
     lost = 0  # consecutive frames without the strip while telemetry is on
     state = {}
+    from .runs import code_version
+    version = code_version()
+    can_act = True
     LOG.parent.mkdir(parents=True, exist_ok=True)
     print(f"Watching window /{a.window}/ … (Ctrl+C stops)" + (" – autopilot ON" if a.auto else ""))
     while True:
+        if control:
+            allowed = control.poll()
+            if allowed and not can_act:
+                last_key, moved = None, True
+            can_act = allowed
         if hud and not hud.running():
             break
         # telemetry needs no animation guard (checksummed game state): poll faster
@@ -328,7 +346,12 @@ def _loop(a, tmp, pilots, hud=None):
                 if new.get("ante") == 1 and (new.get("round") or 0) <= 1 and (state.get("ante") or 1) > 1 \
                         or state.get("phase") == "game_over" and new.get("phase") != "game_over":
                     run_dir = RUNS / f"{datetime.now():%Y%m%d-%H%M%S}"  # a new run in the same session
-                    if a.auto and _head() != head and not (learner and learner.is_alive()):
+                    fails = {}
+                    if a.auto and learner and learner.is_alive():
+                        # wait for the Opus patch: skipping the restart kept 2 patches unloaded for a day (11-01)
+                        print("Waiting for the autolearner before the new run …", flush=True)
+                        learner.join()
+                    if a.auto and _head() != head:
                         # an auto-applied patch (or any commit) landed: restart on the new code between runs
                         print("New code in the repo – restarting the autopilot …", flush=True)
                         os.execv(sys.executable, [sys.executable, "-m", "balatro", *sys.argv[1:]])
@@ -342,17 +365,24 @@ def _loop(a, tmp, pilots, hud=None):
                     print("Note:", n)
                 if text.startswith("RECOMMENDATION") and not a.no_notify:
                     notify("Balatro", text.splitlines()[0])
-                if a.auto:
+                if control:
+                    can_act = control.poll()
+                if a.auto and can_act and (not control or not control.paused or state.get("phase") in
+                                          ("playing", "shop", "booster_pack", "blind_select", "cash_out")):
                     if not pilots:
                         pilots.append(_pilot(a.window, tmp))
+                        if control:
+                            pilots[0].allowed = control.poll
                     try:
-                        ok, msg = pilots[0].act(state, rec) if fails.get(key, 0) < 2 else (False, "waiting for a change")
+                        ok, msg = pilots[0].act(state, rec, details) if fails.get(key, 0) < 2 else (False, "waiting for a change")
                     except RuntimeError as e:
                         ok, msg = False, str(e)
                     print("Autopilot:", msg)
+                    if control:
+                        control.consume()
                     with open(LOG, "a") as f:  # the screen is cleared per analysis: keep a history
                         f.write(f"{datetime.now():%H:%M:%S} {text.splitlines()[0]} -> {msg}\n")
-                    log_move(run_dir, path, state, text, rec, ok, msg)
+                    log_move(run_dir, path, state, text, rec, ok, msg, version, time.time() - started)
                     over_at = time.time() if game_over(state) else None
                     if not ok and fails.get(key, 0) < 2:  # retry once from a fresh frame, then wait for a change
                         fails[key] = fails.get(key, 0) + 1

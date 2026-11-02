@@ -10,6 +10,7 @@ import zlib
 import numpy as np
 
 from ..data import BOSSES, JOKER_NAMES
+from ..jokers import get as get_joker
 from ..vision import _closest
 
 COLS = 320
@@ -91,9 +92,9 @@ def _deck_card(tok):
     """'KS' or 'KS/<enhancement>/<edition>/<seal>' (Lua _tok) -> card dict for Card.parse."""
     rs, *mods = tok.split("/")
     c = {"rank": rs[:-1], "suit": rs[-1:]}
-    for k, v in zip(("enhancement", "edition", "seal"), mods):
+    for k, v in zip(("enhancement", "edition", "seal", "bonus", "played_this_ante"), mods):
         if v:
-            c[k] = v
+            c[k] = _int(v) if k == "bonus" else bool(_int(v)) if k == "played_this_ante" else v
     return c
 
 
@@ -143,6 +144,11 @@ def parse_tsv(tsv):
             if len(p) > 16 and p[16] != "":
                 tarots_used = _int(p[16])
 
+        elif tag == "M" and len(p) >= 9:
+            d.update(telemetry_version=_int(p[1]), seed=p[2] or None, stake=_int(p[3], 1),
+                     round_hands=_int(p[4], 4), round_discards=_int(p[5], 3),
+                     discards_used=_int(p[6]), cash_out_ready=bool(_int(p[7])), won=bool(_int(p[8])))
+
         elif tag == "H" and len(p) >= 13:
             c = {
                 "rank": p[1] or "2",
@@ -158,6 +164,8 @@ def parse_tsv(tsv):
                 "pos": [round(_float(p[11]), 4), round(_float(p[12]), 4)],
                 "conf": 1.0,
             }
+            if len(p) > 13:
+                c["played_this_ante"] = bool(_int(p[13]))
             confs[f"card{len(d['hand'])}"] = 1.0
             d["hand"].append({k: v for k, v in c.items() if k == "highlighted" or v not in (None, False, 0)})
 
@@ -165,12 +173,14 @@ def parse_tsv(tsv):
             raw_name = p[1]
             name = _closest(raw_name, JOKER_NAMES) or raw_name
             jvars = {}
+            spec = get_joker(name)
+            defaults = spec.defaults if spec else {}
             mult, chips, xmult, rem = _float(p[9]), _float(p[10]), _float(p[11], 1.0), _int(p[12], -1)
-            if mult:
+            if mult or p[9] != "" and "mult" in defaults:
                 jvars["mult"] = int(mult) if mult.is_integer() else mult
-            if chips:
+            if chips or p[10] != "" and "chips" in defaults:
                 jvars["chips"] = int(chips) if chips.is_integer() else chips
-            if xmult and xmult != 1.0:
+            if xmult != 1 or p[11] != "" and defaults.get("x", defaults.get("xmult", 1)) != 1:
                 jvars["x" if name in _X_KEY_JOKERS else "xmult"] = round(xmult, 4)
             if rem >= 0 and name == "Loyalty Card":
                 jvars["remaining"] = rem
@@ -198,7 +208,8 @@ def parse_tsv(tsv):
                 "conf": 1.0,
             }
             confs[f"joker{len(d['jokers'])}"] = 1.0
-            d["jokers"].append({k: v for k, v in j.items() if k == "highlighted" or v not in (None, False, {})})
+            d["jokers"].append({k: v for k, v in j.items() if k in ("highlighted", "sell_value") or
+                                 (k == "perish" and v is not None) or v not in (None, False, {})})
 
         elif tag == "C" and len(p) >= 5:
             item = {"name": p[1], "kind": p[2], "pos": [round(_float(p[3]), 4), round(_float(p[4]), 4)], "conf": 1.0}
@@ -261,7 +272,7 @@ def parse_tsv(tsv):
             d["vouchers"] = [x for x in p[1:] if x]
 
         elif tag == "X" and len(p) >= 5:
-            for v, k in zip(p[1:5], ("last_tarot_planet", "upcoming_boss", "small_tag", "big_tag")):
+            for v, k in zip(p[1:6], ("last_tarot_planet", "upcoming_boss", "small_tag", "big_tag", "ox_hand")):
                 if v:
                     d[k] = v
 

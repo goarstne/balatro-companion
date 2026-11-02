@@ -26,7 +26,13 @@ reviews the log and proposes tested code fixes, which are applied automatically.
 - **Desktop widget** – a movable [Quickshell](https://quickshell.outfoxxed.me/) window with the next move,
   chips × mult, blind progress, alternatives, simulated win chances, shop plan and strategy notes.
 - **Autopilot** – clicks through whole runs on Wayland/Hyprland via a virtual pointer (no root, no uinput),
-  confirms every click against the telemetry, continues into Endless Mode after a win.
+  confirms clicks and joker/card drags against fresh telemetry, supports pause and single-step, and continues into Endless Mode after a win.
+- **Replay & what-if lab** – a local browser interface for stepping through runs, inspecting failed actions and
+  score mismatches, changing jokers/hand levels, and scoring selected cards without modifying recorded data.
+- **Boss & deck planning** – simulate the next boss with its hand/discard/debuff restrictions and rank removals,
+  copies and Standard Pack additions against draws from the full known deck.
+- **Measured comparisons** – compare decisions and latency against a Git revision on fixed snapshots; compare
+  completed games by version on matching seed, stake and deck.
 - **Autolearner** – every run is logged with screenshots; after game over Claude Opus analyses it on a throwaway
   copy of the project, writes tests for its fixes, and a green patch is committed automatically
   ([changelog](docs/CHANGELOG.md)).
@@ -129,10 +135,65 @@ Without the patch, download the card sprites once for the local recognition fall
 .venv/bin/python -m balatro live              # advice in the terminal (+ notify-send)
 .venv/bin/python -m balatro live --hud        # advice in the desktop widget
 .venv/bin/python -m balatro live --auto       # the autopilot plays (logs runs, runs the autolearner)
+.venv/bin/python -m balatro live --auto --paused  # start safely paused
+.venv/bin/python -m balatro control step     # one action, then pause again
+.venv/bin/python -m balatro control resume   # continuous play
+.venv/bin/python -m balatro control pause    # stop before the next click/drag
+.venv/bin/python -m balatro inspect          # replay, what-if editor, statistics and live controls
 ```
 
 The window is found by title (`--window`, default `Balatro|Shadow PC`). Don't move the mouse over the game while
 the autopilot runs; `Ctrl+C` stops it. The widget never clicks – `--hud` and `--auto` run as separate processes.
+Pause/step controls also work from the lab. A step may include all selection clicks or drags needed for one action;
+animation/menu frames do not consume it. A paused autopilot continues observing the game.
+
+Automatic dragging requires valid telemetry and confirms every intermediate order before playing or using a
+consumable. Without telemetry, the autopilot keeps the current joker order. Death's targets may require moving its
+source card to the right first. Verdant Leaf is handled by selling the weakest sellable joker during the blind.
+Cash Out waits for the real button after the payout animation.
+
+Re-run the updated `patch_balatro.bat` on the game machine for **telemetry v3**: seed, stake, round resource/discard
+counters, Cash Out readiness, permanent deck-card bonuses and Pillar history. Older strips remain readable; their
+missing metadata is shown as unknown. The Python tests validate drags with simulated frames; real stream latency
+and drag movement still need checking on the target game, preferably starting with `--auto --paused`.
+
+### Replay and comparison
+
+`inspect` serves only on `127.0.0.1`, opens an isolated-token URL in your default browser, and stops with `Ctrl+C`.
+Choose a run, navigate with the slider or arrow buttons, and filter failed actions or score mismatches. Editing
+the state, moving/replacing jokers or changing hand levels recalculates the recommendation. Selecting cards shows
+their own score. **Restore recorded state** discards the edits; the original log stays unchanged.
+The editor supports up to 12 hand cards/jokers and 256 deck cards to bound interactive calculation time.
+
+```bash
+.venv/bin/python -m balatro stats
+.venv/bin/python -m balatro stats --compare 'VERSION_BEFORE' 'VERSION_AFTER'
+.venv/bin/python -m balatro benchmark HEAD examples/flint_boss.json --samples 8
+.venv/bin/python -m balatro benchmark HEAD ~/.local/share/balatro/runs/RUN --limit 20 --output comparison.json
+.venv/bin/python -m balatro boss state.json --ante 8
+.venv/bin/python -m balatro deck state.json
+```
+
+New logs record the Git revision plus a source fingerprint, seed, stake, deck, and action duration in `run.json`
+and `moves.jsonl`. A restarted run that used different code is labelled `mixed`. Older runs have an unknown
+version; no version history is guessed. Failed-action counts exclude menus/animations and repeated waiting messages.
+
+The benchmark checks a detached archive of the named revision against the current checkout using exactly the same
+snapshots, RNG seed and sample count. It does not change branches or apply patches. Its report measures changed
+decisions and latency, **not** win-rate improvements. For the latter, play the same game seeds on both versions
+with the same stake and deck, then use the matching-seed comparison. Logs that merely end mid-run are excluded
+from completed-run rates. Old split logs may describe the same game, so historical aggregate rates are descriptive.
+
+### Retention
+
+On autopilot startup, routine screenshots and learner working copies older than **30 days** are removed. Logs,
+metadata, reports, patches, failed-action/score-mismatch screenshots and their neighbours are kept. No cleanup runs
+in advisor or replay mode. Use `live --auto --retain-days 0` to disable automatic trimming.
+
+```bash
+.venv/bin/python -m balatro prune --days 30         # preview only
+.venv/bin/python -m balatro prune --days 30 --apply # remove the listed routine artifacts
+```
 
 Offline analysis from a JSON state or a screenshot:
 
@@ -169,8 +230,10 @@ After game over:
 2. Claude Opus gets the report, a one-line-per-move summary and the hypotheses from earlier runs, works on a
    throwaway git copy of the project and may change at most three things – each with a test, and only for a clear
    bug or a pattern seen in two runs.
-3. The suite is re-run on Opus' result, then again in the real project; only if both are green is the patch
-   committed (with a [changelog](docs/CHANGELOG.md) entry), otherwise it is rolled back.
+3. The shared core suite (including HUD, telemetry and feature tests) is re-run on Opus' result, then again in
+   the real project; only if both are green is the patch committed with a [changelog](docs/CHANGELOG.md) entry.
+   Test failures, timeouts, interruptions and commit failures roll the patch back. Affected files with local
+   changes are left untouched. Green tests establish correctness checks, not a stronger playing strategy.
 4. The autopilot reloads itself on the new code at the start of the next run.
 
 ## Tests
@@ -178,7 +241,8 @@ After game over:
 The test files are standalone scripts:
 
 ```bash
-for f in tests/test_*.py; do .venv/bin/python -m tests.$(basename $f .py) || echo "FAILED: $f"; done
+.venv/bin/python -m tests         # complete suite, including available screenshot datasets
+.venv/bin/python -m tests --core  # the same selection used by the autolearner
 ```
 
 `tests/test_telemetry_hook.py` runs the Lua hook from `patch_balatro.bat` with `luajit` against mocked game
@@ -186,8 +250,14 @@ objects (skipped without `luajit`); the local-vision tests use labelled screensh
 
 ## Limitations
 
-- Random effects (Lucky cards, Bloodstone, Misprint …) are scored as expected values.
-- The autopilot can't drag jokers or cards yet, so it plans with the joker order as it is.
+- Displayed scores use expected values for random effects. Round simulations roll Lucky cards, Bloodstone,
+  Misprint, Space Joker and random money effects; a high expected score is not treated as a guaranteed win.
+- Boss forecasts label limitations for future hidden cards, forced selections and random joker disables/shuffles.
+  Draws are sampled rather than predicting Balatro's seeded RNG exactly.
+- Card order uses a pair-swap search; deck-copy targeting checks six promising Death pairs. These searches can
+  miss a better arrangement. Deck forecasts need the full deck and do not price every future shop or card creation.
+- Local browser editing and automation controls are for the Linux desktop setup. Live drag calibration on an
+  actual game/stream remains a hardware integration check.
 - Live mode is Hyprland-specific (window lookup, pointer, capture); the engine and CLI are not.
 
 ## Project layout

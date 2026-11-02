@@ -1,6 +1,7 @@
 """python -m balatro {analyze,score,joker,jokers} ..."""
 import argparse
 import json
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -89,6 +90,33 @@ def cmd_learn(a):
         print(learn.improve(a.run))
 
 
+def cmd_stats(a):
+    from .runs import paired, statistics
+    result = statistics(a.runs)
+    if a.compare:
+        result = paired(result["runs"], *a.compare)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_benchmark(a):
+    from .benchmark import compare
+    result = json.dumps(compare(a.revision, a.paths, a.limit, a.samples), indent=2, ensure_ascii=False)
+    if a.output:
+        Path(a.output).write_text(result + "\n")
+    print(result)
+
+
+def cmd_forecast(a):
+    state = State.from_dict(load_state_dict(a.state))
+    if a.cmd == "boss":
+        from .strategy import boss_forecast
+        result = boss_forecast(state, a.ante, a.samples)
+    else:
+        from .deckplan import advice
+        result = advice(state)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="python -m balatro", description="Balatro score engine, advisor and autopilot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -112,6 +140,39 @@ def main(argv=None):
     s.add_argument("--improve", action="store_true", help="then let Claude Opus work out improvements (patch)")
     s.add_argument("--apply", metavar="RUN", help="apply this run's tested Opus patch")
     s.set_defaults(fn=cmd_learn)
+    from .runs import RUNS
+    s = sub.add_parser("inspect", help="local interactive replay and what-if editor")
+    s.add_argument("--runs", type=Path, default=RUNS)
+    s.add_argument("--port", type=int, default=0)
+    s.add_argument("--no-browser", action="store_true")
+    s.set_defaults(fn=lambda a: __import__("balatro.inspect", fromlist=["serve"]).serve(a.runs, a.port, not a.no_browser))
+    s = sub.add_parser("control", help="pause, resume, or single-step a running autopilot")
+    s.add_argument("action", choices=["pause", "resume", "step", "status"])
+    s.set_defaults(fn=lambda a: print(json.dumps(__import__("balatro.control", fromlist=["request"]).request(a.action))))
+    s = sub.add_parser("stats", help="run outcomes, failures and version comparisons")
+    s.add_argument("--runs", type=Path, default=RUNS)
+    s.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"), help="compare versions on matching seed/stake/deck")
+    s.set_defaults(fn=cmd_stats)
+    s = sub.add_parser("prune", help="preview old routine images/work copies eligible for cleanup")
+    s.add_argument("--runs", type=Path, default=RUNS)
+    s.add_argument("--days", type=int, default=30)
+    s.add_argument("--apply", action="store_true", help="delete the listed artifacts; keep logs and error evidence")
+    s.set_defaults(fn=lambda a: print(json.dumps(__import__("balatro.runs", fromlist=["prune"]).prune(a.runs, a.days, a.apply), indent=2)))
+    s = sub.add_parser("benchmark", help="compare this checkout with a Git revision on fixed snapshots")
+    s.add_argument("revision")
+    s.add_argument("paths", nargs="+", help="JSON snapshots or run directories/moves.jsonl")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--samples", type=int, default=8)
+    s.add_argument("--output", help="save the comparison as JSON")
+    s.set_defaults(fn=cmd_benchmark)
+    s = sub.add_parser("boss", help="simulate the upcoming boss and show preparation advice")
+    s.add_argument("state")
+    s.add_argument("--ante", type=int, default=1)
+    s.add_argument("--samples", type=int, default=12)
+    s.set_defaults(fn=cmd_forecast)
+    s = sub.add_parser("deck", help="rank removals/copies across the known full deck")
+    s.add_argument("state")
+    s.set_defaults(fn=cmd_forecast)
     s = sub.add_parser("live", help="watch the game window and give recommendations continuously (Hyprland)")
     s.add_argument("--window", default="Balatro|Shadow PC", help="regex matching the start of the window class or title")
     s.add_argument("--model", help="recognition model (default: sonnet via claude -p, or the API default)")
@@ -122,11 +183,17 @@ def main(argv=None):
                    help="image recognition: local = local only (default), auto = ask Claude when unsure")
     s.add_argument("--debug", action="store_true", help="print difference values (for calibration)")
     s.add_argument("--auto", action="store_true", help="autopilot: carry out recommendations with the mouse")
+    s.add_argument("--paused", action="store_true", help="start --auto paused; use 'control step' for one action")
+    s.add_argument("--retain-days", type=int, default=30, help="trim old routine images/work copies on auto startup (default 30; 0 disables)")
     s.add_argument("--hud", action="store_true", help="movable Quickshell widget (advice only, no autopilot)")
     s.add_argument("--no-improve", action="store_true", help="don't start an Opus improvement after a lost run")
     s.set_defaults(fn=lambda a: __import__("balatro.live", fromlist=["run"]).run(a))
     a = p.parse_args(argv)
+    if getattr(a, "samples", None) is not None and not 1 <= a.samples <= 10000:
+        p.error("--samples must be between 1 and 10000")
+    if getattr(a, "retain_days", 0) < 0:
+        p.error("--retain-days must not be negative")
     try:
         a.fn(a)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
         sys.exit(str(e))

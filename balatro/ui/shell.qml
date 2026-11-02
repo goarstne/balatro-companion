@@ -382,6 +382,12 @@ ShellRoot {
                     }
                     Card {
                         Layout.fillWidth: true
+                        visible: !window.compact && (root.rec.card_order || []).length > 0
+                        Label { text: "REORDER HAND · MANUAL"; color: root.green; font.bold: true }
+                        Label { Layout.fillWidth: true; text: (root.rec.card_order || []).join(" → "); font.pixelSize: 12 }
+                    }
+                    Card {
+                        Layout.fillWidth: true
                         visible: !window.compact && (root.snapshot.shop_actions || []).length > 0
                         Label { text: "SHOP PLAN"; color: root.green; font.bold: true }
                         Repeater {

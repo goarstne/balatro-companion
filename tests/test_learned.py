@@ -77,7 +77,10 @@ class Learned(unittest.TestCase):
             with mock.patch.object(learn, "TESTS", ["nonexistent_suite"]):  # red: rolled back, nothing committed
                 self.assertIn("rolled back", learn.apply(rd, root))
             self.assertEqual((root / "a.py").read_text(), "x = 1\n")
-            with mock.patch.object(learn, "TESTS", []), mock.patch.dict("os.environ", env):
+            (root / "tests").mkdir()
+            (root / "tests/__init__.py").write_text("")
+            (root / "tests/passing_suite.py").write_text("assert 1 + 1 == 2\n")
+            with mock.patch.object(learn, "TESTS", ["passing_suite"]), mock.patch.dict("os.environ", env):
                 self.assertIn("committed", learn.apply(rd, root))
             self.assertEqual((root / "a.py").read_text(), "x = 2\n")
             log = (root / "docs" / "CHANGELOG.md").read_text()

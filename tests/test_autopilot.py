@@ -98,9 +98,19 @@ def main():
     img[:band.shape[0]] = band
     pos = (0.4898, 0.2297)
     want = (pos[0] + autopilot.SELL_D[0], pos[1] + autopilot.SELL_D[1])
-    assert autopilot.button_near(img, want, ("green",), (0.06, 0.055)) is None
+    hit = autopilot.button_near(img, want, ("green",), (0.06, 0.055))
+    assert hit is None or abs(hit[0] - 0.5587) < 0.025, hit  # a wide crop may merge art, but stays on the button
     hit = autopilot.button_near(img, want, ("green",), autopilot.SELL_REACH)
     assert hit is not None and abs(hit[0] - 0.5587) < 0.01, hit
+    # 7b. run 20261101-105644 move 128: Scary Face's SELL button sits on Green Joker's green hat; the blob was
+    # 88 px tall and rejected (the autopilot hung in the shop). The solidly filled rows are the button
+    band = cv2.imread(str(Path(__file__).parent / "fixtures" / "sell_above_green_joker.jpg"))
+    img[:] = 0
+    img[:band.shape[0]] = band
+    pos = (0.3986, 0.2146)
+    want = (pos[0] + autopilot.SELL_D[0], pos[1] + autopilot.SELL_D[1])
+    hit = autopilot.button_near(img, want, ("green",), autopilot.SELL_REACH)
+    assert hit is not None and abs(hit[0] - 0.4727) < 0.01 and abs(hit[1] - 0.200) < 0.01, hit
     # 8. run 20261031-074053 move 89: the crop cut Smiley Face's orange art to button size, so the unselected
     # card looked selected, the art was clicked instead of BUY - twice, then the autopilot waited
     want = (0.5668, 0.4907 + autopilot.CARD_BUY_DY)
@@ -108,6 +118,10 @@ def main():
     assert autopilot.button_near(cv2.imread(str(fx / "shop_smiley_unselected.jpg")), want, ("orange",)) is None
     hit = autopilot.button_near(cv2.imread(str(fx / "shop_smiley_selected.jpg")), want, ("orange",))
     assert hit is not None and abs(hit[1] - 0.5576) < 0.01, hit
+    # run 20261031-194150: a pack's SELECT sat at the top of the crop and was discarded as cut-off art
+    hit = autopilot.button_near(cv2.imread(str(fx / "pack_select_edge.jpg")), (0.4897, 0.666 + autopilot.PICK_DY),
+                                ("green",))
+    assert hit is not None and abs(hit[1] - 0.7136) < 0.01, hit
     # 9. run 20261031-074053: won at ante 8 - the win overlay keeps phase cash_out, Cash Out did nothing
     hit = autopilot.endless_button(cv2.imread(str(fx / "win_screen.jpg")))
     assert hit is not None and abs(hit[0] - 0.645) < 0.01 and abs(hit[1] - 0.74) < 0.01, hit

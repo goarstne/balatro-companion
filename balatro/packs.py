@@ -137,8 +137,7 @@ def _strength_targets(state):
 
 
 def _death_targets(state):
-    """Death turns the LEFT selected card into a copy of the RIGHT one (vanilla: the rightmost highlighted
-    card by screen position is the source, whatever the click order) -> [weak, strong] with weak < strong."""
+    """[weak, strong]; the autopilot moves strong to the right before selecting if necessary."""
     hand = state.hand
     target = _focus_rank(state)
 
@@ -146,11 +145,18 @@ def _death_targets(state):
         return c.chip_bonus() + 30 * bool(c.enhancement) + 30 * bool(c.seal) + 30 * bool(c.edition), c.rank
 
     pairs = [(value(hand[s])[0] - value(hand[w])[0], value(hand[s]), w, s)
-             for s in range(len(hand)) for w in range(s)
+             for s in range(len(hand)) for w in range(len(hand)) if w != s
              if (hand[s].enhancement or hand[s].seal or hand[s].edition or hand[s].rank == target)
              and value(hand[s]) > value(hand[w])]
     if not pairs:
-        return []  # nothing worth copying sits right of a weaker card
+        return []
+    if state.full_deck is not None:
+        from .deckplan import compare
+        pairs.sort(reverse=True)
+        # shortcut: score the six strongest copy candidates; widen if recorded packs expose a missed target.
+        ranked = [(compare(state, replacement=(hand[w], hand[s])), w, s) for _, _, w, s in pairs[:6]]
+        _, weak, strong = max(ranked, key=lambda x: (x[0]["gain"], x[0]["focus_delta"]))
+        return [weak, strong]
     _, _, weak, strong = max(pairs)
     return [weak, strong]
 
@@ -160,6 +166,13 @@ def _hanged_targets(state):
     cand = [i for i, c in enumerate(hand)
             if not c.stone and c.enhancement is None and c.edition is None and c.seal is None]
     cand.sort(key=lambda i: (hand[i].chip_bonus(), hand[i].rank))
+    if state.full_deck is not None and cand:
+        import itertools
+        from .deckplan import compare
+        options = [(compare(state, remove=[hand[i] for i in indices]), indices)
+                   for k in (1, 2) for indices in itertools.combinations(cand, k)]
+        best, indices = max(options, key=lambda x: (x[0]["gain"], x[0]["focus_delta"]))
+        return list(indices) if best["gain"] > 0 or best["focus_delta"] > 0 else []
     return cand[:2]
 
 
@@ -217,7 +230,7 @@ def _tarot_choice(state, name):
             return (0, [], "All cards already have this suit")
         return (5, targets, f"Recolour {len(targets)} cards to {suit} (Flush)")
     if name == "The Hanged Man":
-        if focus in ("Straight", "Straight Flush"):
+        if state.full_deck is None and focus in ("Straight", "Straight Flush"):
             return (0, [], "Straight focus: removing cards is risky")
         targets = _hanged_targets(state)
         if not targets:
@@ -398,9 +411,19 @@ def _standard_value(state, c, focus):
 
 def _choose_standard(state, cards):
     focus = focus_hand(state)
+    holo = "Hologram" in _names(state)
     best = None
     for i, c in enumerate(cards):
         value, why = _standard_value(state, c, focus)
+        if state.full_deck is not None:
+            from .deckplan import compare
+            forecast = compare(state, add=Card.parse(c))
+            value += max(-3, min(3, forecast["gain"] * 10 + forecast["focus_delta"] * 5))
+            why += f"; deck draw score {forecast['gain']:+.0%}, {focus} draw chance {forecast['focus_chance']:.0%}"
+        if holo and value <= 0:
+            # every added card is +X0.25 for Hologram; the shop buys the pack for it (run 20261101-105644 Z385:
+            # Mega Standard Pack bought "feeds Hologram", then skipped as "dilutes the deck", Hologram stayed X1)
+            value, why = 1, f"{c.get('name') or Card.parse(c)}: +X0.25 for Hologram"
         if value > 0 and (best is None or value > best[0]):
             best = (value, i, why)
     if best is None:

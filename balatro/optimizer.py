@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 from .data import RANK_NAMES
-from .engine import active_flags, apply_boss_debuffs, detect, most_played, score
+from .engine import active_flags, apply_boss_debuffs, detect, most_played, score, stochastic
 from .jokers import get as get_joker
 
 SUIT_SYMBOLS = {"S": "♠", "H": "♥", "C": "♣", "D": "♦"}
@@ -114,7 +114,8 @@ def _joker_plan(state, play_idx=None, discard_idx=None, hook=False):
             initial = (3 + (state.deck_type == "Red Deck") + names.count("Drunkard")
                        + 3 * names.count("Merry Andy")
                        + sum(voucher in state.vouchers for voucher in ("Wasteful", "Recyclomancy")))
-            first = v.get("first_discard", state.discards_left == initial)
+            first = state.discards_used == 0 if state.discards_used is not None else v.get(
+                "first_discard", state.discards_left == initial)
             if name == "Green Joker":
                 grow(j, "mult", -min(1, v["mult"]), 10, "a discard costs 1 mult")
             elif name == "Ramen":
@@ -161,8 +162,14 @@ def _joker_plan(state, play_idx=None, discard_idx=None, hook=False):
         if _boss(state) == "The Ox" and ht == most_played(state) and state.money > 0:
             after.money = 0
             bonus(-min(state.money, 50) / 25, f"The Ox: {ht} is the most played hand – money drops to $0")
+        if _boss(state) == "The Arm" and state.level(ht) > 1:
+            # permanent level loss, the mirror of Burnt Joker's +0.5 (run 20261031-194150: Pair lvl 3 -> 1)
+            after.hand_levels = {**after.hand_levels, ht: state.level(ht) - 1}
+            bonus(-0.5, f"The Arm: {ht} loses a level")
     elif not hook:
         after.discards_left -= 1
+        if after.discards_used is not None:
+            after.discards_used += 1
     return after, utility, reasons
 
 
@@ -262,11 +269,13 @@ def _best_score(state):
     """Best single-play score, memoised by the full state: shop/pack valuation re-scores the same sampled
     hands for every offer, baseline and estimate. ponytail: repr key, cleared wholesale when large."""
     key = repr(state)
-    if key not in _SCORE_MEMO:
+    value = _SCORE_MEMO.get(key)
+    if value is None:
+        value = _best_play(state)[0]
         if len(_SCORE_MEMO) > 50_000:
             _SCORE_MEMO.clear()
-        _SCORE_MEMO[key] = _best_play(state)[0]
-    return _SCORE_MEMO[key]
+        _SCORE_MEMO[key] = value
+    return value
 
 
 def add_kickers(state, idx, deck_left=True):
@@ -312,6 +321,7 @@ def _draw(kept, deck, state):
 
 
 def _after_play(state, idx, rng):
+    scored = state
     if _boss(state) == "The Hook":
         held = [i for i in range(len(state.hand)) if i not in idx]
         drop = set(rng.sample(held, min(2, len(held))))
@@ -321,8 +331,15 @@ def _after_play(state, idx, rng):
             kept = [i for i in range(len(state.hand)) if i not in drop]
             idx = tuple(kept.index(i) for i in idx)
             state = replace(state, hand=[state.hand[i] for i in kept])
-    result = score(state, idx)
+            scored = replace(state, boss_disabled=True)  # Hook already applied; score() must not repeat it
+    result = score(scored, idx, rng=rng)
     after, _, _ = _joker_plan(state, play_idx=idx)
+    after.money += result.money
+    for j, values in zip(after.jokers, result.joker_vars):
+        if j.name == "Lucky Cat":
+            j.vars = values
+    if result.level_delta:
+        after.hand_levels = {**after.hand_levels, result.hand_type: max(1, state.level(result.hand_type) + result.level_delta)}
     rest = [c for i, c in enumerate(after.hand) if i not in idx]
     return after, rest, result
 
@@ -330,7 +347,7 @@ def _after_play(state, idx, rng):
 def _round_total(state, hand, deck, hands, discards, need, total=0, rng=None):
     """Greedy round rollout with evolving joker counters and boss hand history.
 
-    shortcut: no future rearrangement, card creation or random scoring rolls; expand for exact rollouts.
+    shortcut: no future rearrangement or card creation; expand for exact rollouts.
     """
     rng = rng or random.Random(0)
     if _boss(state) == "The Needle":
@@ -366,7 +383,7 @@ def _decks(state, samples, seed):
 def play_now_odds(state, idx, now, samples=40, seed=0):
     """(round win chance, expected round score) if idx is played now and the round is played out."""
     need = state.blind_chips - state.score
-    if now >= need and _boss(state) != "The Hook":
+    if now >= need and _boss(state) != "The Hook" and not stochastic(state):
         return 1.0, float(now)
     totals = []
     for n, deck in enumerate(_decks(state, samples, seed)):
@@ -408,6 +425,27 @@ def best_joker_order(state, played_idx):
     if best_order is None:
         return None
     return best_order, score(replace(state, jokers=best_order), played_idx, verbose=True)
+
+
+def best_card_order(state, played_idx):
+    """Improve played and held order without changing which cards are played."""
+    idx = tuple(sorted(played_idx))
+    order = list(range(len(state.hand)))
+    best = score(state, idx).score
+    for positions in (list(idx), [i for i in order if i not in idx]):
+        improved = True
+        while improved:
+            improved = False
+            for a, b in itertools.permutations(positions, 2):
+                candidate = order[:]
+                candidate[a], candidate[b] = candidate[b], candidate[a]
+                value = score(replace(state, hand=[state.hand[i] for i in candidate]), idx).score
+                if value > best:
+                    best, order, improved = value, candidate, True
+    # shortcut: pair-swap hill climb; use a wider search if logged hands expose a local optimum.
+    if order == list(range(len(state.hand))):
+        return None
+    return tuple(order), score(replace(state, hand=[state.hand[i] for i in order]), idx, verbose=True)
 
 
 def _with_forced(hand, drop):
@@ -544,6 +582,7 @@ class Recommendation:
     play_win: float | None = None   # simulated chance for the round; None if not simulated
     play_expected: float | None = None
     samples: int = 0
+    card_order: tuple | None = None
 
 
 def recommend(state, samples=40, seed=0, reorder=True):
@@ -568,12 +607,15 @@ def recommend(state, samples=40, seed=0, reorder=True):
     idx, now = max(winners, key=preference) if winners else plays[0]
     order = best_joker_order(state, idx) if reorder else None
     now_best = order[1].score if order else now.score
+    card_order = best_card_order(replace(state, jokers=order[0]) if order else state, idx) if reorder else None
+    if card_order:
+        now_best = max(now_best, card_order[1].score)
     opts, chosen_discard = [], None
     p_play = e_play = None
     used_samples = 0
     if state.blind_chips <= 0:
         reason = "Blind target unknown: play the highest score."
-    elif now_best >= need and _boss(state) != "The Hook" and not any(
+    elif now_best >= need and _boss(state) != "The Hook" and not stochastic(state) and not any(
             joker_utility(state, discard_idx=d)[0] > utilities[idx][0]
             for _, d in _discard_candidates(state, plays[:5]) if state.discards_left > 0):
         reason = f"{now_best:,} ≥ {need:,} needed: wins the blind."
@@ -645,7 +687,7 @@ def recommend(state, samples=40, seed=0, reorder=True):
             reason = (f"Round win chance: discard {chosen_discard.p_win:.0%} vs. play now {p_play:.0%} "
                       f"(expected {chosen_discard.expected:,.0f} instead of {e_play:,.0f} round points).")
         elif now_best >= need and p_play == 1:
-            reason = f"{now_best:,} ≥ {need:,} needed: wins the blind."
+            reason = f"All {used_samples} simulations won; this is an estimate, not a guarantee."
         else:
             reason = f"Play now: round win chance {p_play:.0%}" + (
                 "; keep the discards for later." if state.discards_left > 0 else "; no discards left.")
@@ -659,9 +701,10 @@ def recommend(state, samples=40, seed=0, reorder=True):
     if action == "play" and now.hand_type == focus and state.blind_chips > 0:
         reason += f" Focus hand: {focus}."
     kickers = tuple(i for i in idx if i not in now.scoring_idx) if now.score < need else ()
+    card_order = best_card_order(replace(state, jokers=order[0]) if order else state, idx) if reorder else None
     return Recommendation(action, reason, need, idx, score(state, idx, verbose=True),
                           [p for p in plays[:5] if p[0] != idx], order, chosen_discard, opts, state.hand, kickers,
-                          play_win=p_play, play_expected=e_play, samples=used_samples)
+                          play_win=p_play, play_expected=e_play, samples=used_samples, card_order=card_order)
 
 
 def format_recommendation(rec):
@@ -684,6 +727,9 @@ def format_recommendation(rec):
     if rec.joker_order:
         js, r = rec.joker_order
         out.append(f"Reorder jokers: {' | '.join(map(str, js))} → {r.score:,} points")
+    if rec.card_order:
+        order, result = rec.card_order
+        out.append(f"Reorder hand: {' | '.join(str(hand[i]) for i in order)} → {result.score:,} points")
     out.append("")
     out.append(f"Scoring of the best hand now ({play_cards}):")
     out += ["  " + line for line in rec.play.log]

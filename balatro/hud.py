@@ -58,7 +58,7 @@ def model(d, text, rec=None, details=None, notes=(), duration=0):
     recommendation = {"title": title, "reason": "\n".join(filter(None, [explanation, *lines[1:]])), "cards": [], "score": None,
                       "chips": None, "mult": None, "hand_type": None, "need": None,
                       "projected": None, "play_win": None, "discard_win": None, "samples": 0,
-                      "joker_order": [], "reordered_score": None, "log": []}
+                      "joker_order": [], "card_order": [], "reordered_score": None, "log": []}
     alternatives = []
     discards = []
     if rec is not None:
@@ -73,6 +73,8 @@ def model(d, text, rec=None, details=None, notes=(), duration=0):
         if rec.joker_order:
             recommendation.update(joker_order=[str(j) for j in rec.joker_order[0]],
                                   reordered_score=rec.joker_order[1].score)
+        if rec.card_order:
+            recommendation["card_order"] = [card_name(state.hand[i]) for i in rec.card_order[0]]
         alternatives = [{"hand": r.hand_type, "score": r.score, "cards": " · ".join(card_name(state.hand[i]) for i in idx)}
                         for idx, r in rec.alternatives[:3]]
         discards = [{"cards": " · ".join(card_name(c) for c in o.discarded), "win": o.p_win,

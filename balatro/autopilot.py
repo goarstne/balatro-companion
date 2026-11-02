@@ -5,6 +5,8 @@ screen coordinates. Before every Play/Discard the selection is checked on a fres
 the wrong cards are never played.
 """
 import time
+import json
+from dataclasses import asdict
 
 import cv2
 import numpy as np
@@ -16,7 +18,7 @@ from .localvision.jokers import read_jokers, read_shop
 from .localvision.layout import REF_W, canvas_box, normalize
 from .localvision.telemetry import decode_strip
 from .data import SUIT_DEBUFF_BOSSES
-from .models import State
+from .models import Card, Joker, State
 from .pointer import Pointer, focus_window_at, move_cursor
 from .packs import choose_from_pack, use_consumable
 from .shop import shop_plan
@@ -66,7 +68,8 @@ def button_near(canvas, want, colours=("orange", "green", "red"), reach=(0.06, 0
     A button is a solid rectangle of button size; card art (Raised Fist's orange rays) is not."""
     H, W = canvas.shape[:2]
     x0, x1 = max(0, int((want[0] - reach[0]) * W)), int((want[0] + reach[0]) * W)
-    y0, y1 = max(0, int((want[1] - reach[1]) * H)), int((want[1] + reach[1]) * H)
+    pad = 0.03  # look a bit beyond reach so a button near its edge isn't cut by the crop; its centre must be in reach
+    y0, y1 = max(0, int((want[1] - reach[1] - pad) * H)), int((want[1] + reach[1] + pad) * H)
     b, g, r = (canvas[y0:y1, x0:x1, i].astype(np.int16) for i in range(3))
     if b.size == 0:  # empty capture (stream hiccup): no button, the caller looks again
         return None
@@ -74,13 +77,23 @@ def button_near(canvas, want, colours=("orange", "green", "red"), reach=(0.06, 0
     for c in colours:
         m |= BUTTON_COLOURS[c](b, g, r)
     m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))  # close the label text
-    n, _, st, cen = cv2.connectedComponentsWithStats(m)
+    n, lab, st, cen = cv2.connectedComponentsWithStats(m)
+    st, cen = st.copy(), cen.copy()
+    for i in range(1, n):  # green art below the button (Green Joker's hat) makes the blob too tall: keep the
+        bx, by, bw, bh, a = st[i]  # longest run of solidly filled rows - the button; art rows are ragged
+        if bh > 80:
+            full = (lab[by:by + bh, bx:bx + bw] == i).mean(axis=1) >= 0.8
+            runs = np.flatnonzero(np.diff(np.r_[0, full.astype(np.int8), 0]))
+            if len(runs):
+                s, e = max(zip(runs[::2], runs[1::2]), key=lambda r: r[1] - r[0])
+                st[i] = bx, by + s, bw, e - s, (lab[by + s:by + e, bx:bx + bw] == i).sum()
+                cen[i] = bx + bw / 2, by + (s + e) / 2
     h = m.shape[0]
     # a blob touching the crop's top/bottom was cut to size by it (Smiley Face's orange art above the BUY
     # spot), not a button; left/right stay allowed: the SELL crop starts right at the button's edge
     hits = [((cx + x0) / W, (cy + y0) / H) for (bx, by, bw, bh, a), (cx, cy) in zip(st[1:], cen[1:])
             if 35 <= bw <= 120 and 15 <= bh <= 80 and bw >= 0.75 * bh and a > 0.6 * bw * bh  # SELL $2: 63x64
-            and by > 0 and by + bh < h]
+            and by > 0 and by + bh < h and abs((cy + y0) / H - want[1]) <= reach[1]]
     return min(hits, key=lambda c: (c[0] - want[0]) ** 2 + (c[1] - want[1]) ** 2, default=None)
 
 
@@ -93,6 +106,18 @@ def endless_button(canvas):
     H, W = m.shape
     return next(((cx / W, cy / H) for (bx, by, bw, bh, a), (cx, cy) in zip(st[1:], cen[1:])
                  if bw > 0.2 * W and 0.04 * H < bh < 0.1 * H and a > 0.7 * bw * bh), None)
+
+
+def cash_out_button(canvas):
+    """The wide orange button appears only after the round payout animation finishes."""
+    b, g, r = (canvas[..., i].astype(np.int16) for i in range(3))
+    mask = cv2.morphologyEx(BUTTON_COLOURS["orange"](b, g, r).astype(np.uint8),
+                           cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    _, _, stats, centers = cv2.connectedComponentsWithStats(mask)
+    H, W = mask.shape
+    return next(((x / W, y / H) for (_, _, w, h, area), (x, y) in zip(stats[1:], centers[1:])
+                 if 0.2 * W < w < 0.5 * W and 0.035 * H < h < 0.12 * H and area > 0.6 * w * h
+                 and 0.3 < x / W < 0.8 and 0.15 < y / H < 0.7), None)
 
 
 def tooltip_is(canvas, pos, name):
@@ -144,11 +169,15 @@ class Autopilot:
         return Screen(geom, img), normalize(img)
 
     def click(self, scr, fx, fy):
+        if not getattr(self, "allowed", lambda: True)():
+            raise RuntimeError("Autopilot paused before click")
         if not getattr(self, "focused", False):  # once per act(): the window doesn't change between clicks
             if self.focus(*scr.point(fx, fy)):  # unfocused: the click would be swallowed; focusing may shift it
                 time.sleep(0.4)
                 scr = self._screen()[0]
             self.focused = True
+        if not getattr(self, "allowed", lambda: True)():
+            raise RuntimeError("Autopilot paused before click")
         self.ptr.click(*scr.point(fx, fy))
 
     def park(self, scr):
@@ -156,18 +185,34 @@ class Autopilot:
         time.sleep(0.05)
         self.ptr.nudge()  # without a motion event the game keeps the last card's hover tooltip
 
-    def act(self, d, rec):
+    def act(self, d, rec, details=None):
         """Carry out the recommendation for recognised state d. -> (done, short German status)."""
         phase = d.get("phase")
         self.focused = False
         if phase != "shop":
             self.pack_names, self.shop_fails = {}, {}
+        if phase == "playing" and d.get("blind") == "Verdant Leaf" and not d.get("boss_disabled"):
+            state = State.from_dict(d)
+            if not any(j.name == "Chicot" and not j.debuff for j in state.jokers):
+                from .shop import ShopAction
+                from .strategy import leaf_sale
+                sale = leaf_sale(state, d.get("ante") or 8)
+                if sale is None or not d.get("telemetry"):
+                    return False, "Verdant Leaf: sell a joker manually to remove the debuff"
+                return self._shop_action({**d, "shop": []}, state,
+                                         ShopAction("sell", sale, "disable Verdant Leaf"))
         if phase in ("shop", "playing", "blind_select") and d.get("consumable_items"):
             done = self.consumables(d, phase)
             if done:
                 return done
         tel = bool(d.get("telemetry"))
         if phase == "playing" and rec is not None:
+            if tel and rec.joker_order:
+                desired = [asdict(j) for j in rec.joker_order[0]]
+                return self.reorder(d, "jokers", desired)
+            if tel and rec.card_order:
+                desired = [d["hand"][i] for i in rec.card_order[0]]
+                return self.reorder(d, "hand", desired)
             idx = rec.play_idx if rec.action == "play" else rec.discard.discard_idx
             ok = self.cards(rec.action, idx, [(c["rank"], c["suit"]) for c in d["hand"]],
                             SUIT_DEBUFF_BOSSES.get(d.get("blind")))
@@ -208,13 +253,32 @@ class Autopilot:
                 if endless_button(self._screen()[1]):
                     return False, "Endless Mode had no visible effect"
                 return True, "Won – continuing in Endless Mode"
-            self.click(scr, *BUTTONS["cash_out"])
+            end = time.monotonic() + 12
+            while True:
+                tel_state = decode_strip(canvas)
+                observed = tel_state[0] if tel_state else {}
+                ready = observed.get("cash_out_ready")
+                if ready:
+                    pos = cash_out_button(canvas)
+                    if pos:
+                        break
+                # Old hooks: wait until the actual orange Cash Out button is visible.
+                pos = cash_out_button(canvas) if ready is None else None
+                if pos:
+                    break
+                if time.monotonic() >= end:
+                    return False, "Cash Out is not ready yet"
+                time.sleep(0.2)
+                scr, canvas = self._screen()
+                if endless_button(canvas):
+                    return True, "Win screen ready; re-read before continuing"
+            self.click(scr, *pos)
             self.park(scr)
             if self._confirm(lambda t: t.get("phase") != "cash_out", 3.0, tel) is False:
                 return False, "Cash Out had no visible effect"
             return True, "Cash Out"
         if phase == "shop" and d.get("shop") is not None:
-            return self.shop(d)
+            return self.shop(d, (details or {}).get("shop_actions"))
         if phase == "booster_pack" and d.get("booster"):
             return self.booster(d)
         return False, f"phase {phase!r}: no automatic action"
@@ -292,18 +356,69 @@ class Autopilot:
             if boss_suit and c.get("debuff") and "highlighted" not in c:  # telemetry cards: exact suit
                 c["suit"] = boss_suit
         same = sum((c["rank"], c["suit"]) == e for c, e in zip(hand, expect))
-        if len(hand) != len(expect) or same < 0.75 * len(expect):  # ponytail: tolerates 1-2 misread cards
+        required = len(expect) if any("highlighted" in c for c in hand) else 0.75 * len(expect)
+        if len(hand) != len(expect) or same < required:
             self.last_mismatch = [c["rank"] + c["suit"] for c in hand], [r + u for r, u in expect]
             return False
         return True
 
-    def shop(self, d):
+    def reorder(self, d, area, desired):
+        """One drag per action; confirm the entire intermediate order on fresh telemetry."""
+        parse = Joker.parse if area == "jokers" else Card.parse
+        key = lambda item: json.dumps(asdict(parse(item)), sort_keys=True)
+        original = [key(c) for c in d.get(area, [])]
+        target = [key(c) for c in desired]
+        if sorted(original) != sorted(target):
+            return False, "Reorder rejected: card identities changed"
+        scr, canvas = self._screen()
+        tel = decode_strip(canvas)
+        if tel is None or tel[0].get("phase") != d.get("phase"):
+            return False, "Reorder requires fresh telemetry in the same phase"
+        cards = tel[0].get(area, [])
+        if [key(c) for c in cards] != original:
+            return False, "Reorder rejected: row changed"
+        for destination, wanted in enumerate(target):
+            if original[destination] == wanted:
+                continue
+            source = original.index(wanted, destination + 1)
+            if self.focus(*scr.point(*cards[source]["pos"])):
+                return False, "Window focused; re-read before dragging"
+            self.focused = True
+            intermediate = original[:]
+            intermediate.insert(destination, intermediate.pop(source))
+            if not getattr(self, "allowed", lambda: True)():
+                return False, "Autopilot paused before drag"
+            self.ptr.drag(scr.point(*cards[source]["pos"]), scr.point(*cards[destination]["pos"]))
+            self.park(scr)
+            if self._confirm(lambda t: t.get("phase") == d.get("phase") and
+                             [key(c) for c in t.get(area, [])] == intermediate, timeout=5) is not True:
+                return False, "Drag order was not confirmed; nothing played"
+            original = intermediate
+            _, canvas = self._screen()
+            tel = decode_strip(canvas)
+            if tel is None or [key(c) for c in tel[0].get(area, [])] != original:
+                return False, "Row changed after drag; nothing played"
+            cards = tel[0][area]
+        return True, f"Reordered {area}"
+
+    def _death_order(self, d, choice, name):
+        if name != "Death" or len(choice.targets) != 2 or choice.targets[0] < choice.targets[1]:
+            return None
+        if not d.get("telemetry"):
+            return False, "Death needs a confirmed hand reorder; telemetry unavailable"
+        weak, strong = choice.targets
+        desired = list(d["hand"])
+        desired[weak], desired[strong] = desired[strong], desired[weak]
+        return self.reorder(d, "hand", desired)
+
+    def shop(self, d, actions=None):
         """Carry out the first action of the shop plan (the shop re-lays out after every action, the live loop
         re-reads it and calls again): buy (joker/card BUY, pack OPEN, voucher REDEEM), sell, reroll, leave."""
         scr, canvas = self._screen()
         self._name_packs(scr, d)
         state = State.from_dict(d)
-        action = _shop_plan(state, d)
+        from .shop import ShopAction
+        action = ShopAction(**actions[0]) if actions and d.get("telemetry") else _shop_plan(state, d)
         target = (action.kind, d["shop"][action.index]["name"] if action.kind == "buy" else
                   state.jokers[action.index].name if action.kind == "sell" else "")
         if self.shop_fails.get(target, 0) >= 2:  # keyed by the action, so flickering reads can't reset it
@@ -371,6 +486,9 @@ class Autopilot:
             choice = use_consumable(state, c["name"], c["kind"])
             if choice.index != 0 or (choice.targets and phase != "playing"):
                 continue
+            rearrange = self._death_order(d, choice, c["name"])
+            if rearrange:
+                return rearrange
             scr, canvas = self._screen()
             if choice.targets:
                 sel = self._select(set(choice.targets), read_hand, [(h["rank"], h["suit"]) for h in d["hand"]])
@@ -417,12 +535,15 @@ class Autopilot:
             self.click(scr, *BUTTONS["skip_pack"])
             self.park(scr)
             return True, f"Pack skipped – {choice.why}"
+        card = b["cards"][choice.index]
+        rearrange = self._death_order(d, choice, card.get("name"))
+        if rearrange:
+            return rearrange
         if choice.targets:  # Arcana/Spectral: the hand is dealt below the offered cards
             sel = self._select(set(choice.targets), read_pack_hand, [(h["rank"], h["suit"]) for h in d["hand"]])
             if sel is None:
                 return False, "hand cards in the pack don't match the recognition – nothing picked"
             scr = sel[0]
-        card = b["cards"][choice.index]
         use = card.get("kind") in ("planet", "tarot", "spectral")  # used at once: red USE, else green SELECT
         if not self._press(scr, card["pos"], PICK_DY, colour="red" if use else "green"):
             return False, ("USE button (red) not found – card may not be usable" if use

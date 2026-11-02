@@ -122,6 +122,14 @@ def test_standard_skip_plain():
     assert choose_from_pack(s, "Standard Pack", cards).index is None
 
 
+def test_standard_plain_feeds_hologram():
+    # run 20261101-105644 Z385: the pack was bought for Hologram, then skipped as "dilutes the deck"
+    s = State(hand=[Card(10, "H"), Card(9, "H"), Card(8, "H")], hand_levels={"Flush": 2}, jokers=[Joker("Hologram")])
+    cards = [{"kind": "playing_card", "name": "Ace of Spades", "rank": 14, "suit": "S",
+              "enhancement": None, "seal": None, "edition": None}]
+    assert choose_from_pack(s, "Standard Pack", cards).index == 0
+
+
 def test_standard_steel_baron():
     s = State(hand=[Card(13, "H")], jokers=[Joker("Baron")])
     cards = [{"kind": "playing_card", "name": "King of Hearts", "rank": 13, "suit": "H",
@@ -188,12 +196,12 @@ def test_empty_pack():
 
 def test_death_copies_right_onto_left():
     # live run 20261030-194631 move 33: 4S[glass] left of 2H. Death copies the RIGHT card onto the left
-    # one, so [2H, 4S] would have destroyed the glass card. Only a weaker card LEFT of the glass card works.
+    # one. Targets now carry weak/source roles; the autopilot must reorder when weak sits on the right.
     s = State(hand=[Card(9, "C"), Card(4, "S", enhancement="glass"), Card(2, "H")])
     ch = use_consumable(s, "Death", "tarot")
-    assert ch.targets == [0, 1], ch
+    assert ch.targets == [2, 1], ch
     s = State(hand=[Card(4, "S", enhancement="glass"), Card(2, "H")])  # nothing weaker left of it
-    assert use_consumable(s, "Death", "tarot").index is None
+    assert use_consumable(s, "Death", "tarot").targets == [1, 0]
 
 
 def test_fool_needs_last_card():

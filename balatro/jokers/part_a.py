@@ -69,7 +69,8 @@ reg("Loyalty Card", "Uncommon", 5, "X4 Mult every 6 hands played", defaults={"re
     notes="vars.remaining = the counter shown in game; 0 ('Active!') means this hand gives X4.")
 reg("8 Ball", "Common", 5, "1 in 4 chance for each played 8 to create a Tarot card when scored",
     notes="No scoring effect.")
-reg("Misprint", "Common", 4, "+0 to +23 Mult (random)", main=lambda j, ctx: ctx.add_mult(11.5, j),
+reg("Misprint", "Common", 4, "+0 to +23 Mult (random)", main=lambda j, ctx: ctx.add_mult(
+    ctx.rng.randrange(24) if ctx.rng is not None else 11.5, j),
     notes="Scored as expected value +11.5 Mult.")
 reg("Dusk", "Uncommon", 5, "Retrigger all played cards in final hand of round",
     retrigger=lambda j, ctx, card, area: 1 if area == "play" and ctx.final_hand else 0)

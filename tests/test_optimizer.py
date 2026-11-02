@@ -403,6 +403,18 @@ def test_the_ox():
     assert joker_utility(st, play_idx=(0, 1))[0] < joker_utility(st, play_idx=(2,))[0]
 
 
+def test_the_arm():
+    # The Arm lowers the played hand's level for good: rollouts see it, utility prefers a level-1 hand
+    from balatro.optimizer import _joker_plan
+    st = State(hand=hand("KH KC 2S"), blind="The Arm", hand_levels={"Pair": 3}, blind_chips=10_000)
+    after, value, _ = _joker_plan(st, play_idx=(0, 1))
+    assert after.level("Pair") == 2 and value < 0 and st.level("Pair") == 3
+    after, value, _ = _joker_plan(st, play_idx=(2,))
+    assert after.level("High Card") == 1 and value == 0
+    st.boss_disabled = True
+    assert _joker_plan(st, play_idx=(0, 1))[0].level("Pair") == 3
+
+
 def test_the_serpent():
     from balatro.optimizer import _draw, add_kickers
     st = State(hand=hand("KH KC 2S 3D 5C 7H 9S JD"), blind="The Serpent", blind_chips=10_000, deck=hand("4H 6H 8H 10H"))

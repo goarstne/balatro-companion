@@ -61,6 +61,9 @@ def photograph_scored(j, ctx, card):
 
 def lucky_cat_scored(j, ctx, card):
     if card.enhancement == "lucky" and not ctx.copying:
+        if ctx.rng is not None:
+            j.vars["x"] += 0.25 * ctx.extra.get("lucky_triggered", False)
+            return
         p_mult, p_money = ctx.chance(1, 5), ctx.chance(1, 15)
         j.vars["x"] += 0.25 * (1 - (1 - p_mult) * (1 - p_money))  # EV of "lucky triggered"
 

@@ -16,8 +16,19 @@ MUTATES_CARDS = {"Hiker", "Vampire", "Midas Mask"}  # hooks that change scored c
 PASSIVE = {"Four Fingers", "Shortcut", "Smeared Joker", "Pareidolia", "Splash", "Oops! All 6s", "Chicot"}
 
 
+def stochastic(state):
+    names = {j.name for j in state.jokers if not j.debuff}
+    return bool(names & {"Misprint", "Bloodstone", "Space Joker"}) or bool(
+        names & {"Bull", "Bootstraps"} and names & {"Business Card", "Reserved Parking"}) or any(
+            c.enhancement == "lucky" and not c.debuff for c in state.hand)
+
+
 def most_played(state):
-    """The Ox's hand: most played this run, ties to the stronger hand (vanilla most_played_poker_hand)."""
+    """The Ox's hand. Vanilla fixes it in end_round after each boss, so live counts can disagree: run
+    20261101-212446 Z241 played Pair (8x, the Ox hand) for $43 -> $0 because High Card had since reached 9x.
+    Without telemetry: most played this run, ties to the stronger hand."""
+    if state.ox_hand:
+        return state.ox_hand
     return max(HAND_ORDER, key=lambda h: state.played_counts.get(h, 0))
 
 
@@ -133,6 +144,7 @@ class Ctx:
     # mutable per-hand extras jokers may use (e.g. cards destroyed, levels gained)
     extra: dict = field(default_factory=dict)
     hooks: dict = field(default_factory=dict)  # hook -> resolved _calls list
+    rng: object = None
 
     def _note(self, what, src):
         if self.verbose:
@@ -158,7 +170,8 @@ class Ctx:
         self.money += n
 
     def chance(self, num, den):
-        return min(1.0, num * self.prob / den)
+        p = min(1.0, num * self.prob / den)
+        return int(self.rng.random() < p) if self.rng is not None else p
 
     def is_face(self, card):
         return card.is_face(self.flags)
@@ -228,7 +241,7 @@ def apply_boss_debuffs(state):
     out = []
     for c in state.hand:
         d = c.debuff or (suit and c.is_suit(suit, flags)) or (state.blind == "The Plant" and c.is_face(flags)) \
-            or state.blind == "Verdant Leaf"
+            or state.blind == "Verdant Leaf" or state.blind == "The Pillar" and c.played_this_ante
         out.append(replace(c, debuff=bool(d)) if d != c.debuff else c)
     return out
 
@@ -244,10 +257,16 @@ class Result:
     log: list = field(default_factory=list)
     reason: str = ""
     scoring_idx: list = field(default_factory=list)  # indices into state.hand
+    joker_vars: list = field(default_factory=list)
+    level_delta: float = 0
 
 
-def score(state, played_idx, verbose=False):
+def score(state, played_idx, verbose=False, rng=None):
     """Score playing state.hand[i] for i in played_idx (in hand order). Does not mutate state."""
+    played_idx = tuple(played_idx)
+    if len(played_idx) > 5 or len(set(played_idx)) != len(played_idx) or any(
+            type(i) is not int or not 0 <= i < len(state.hand) for i in played_idx):
+        raise ValueError("Play 1–5 distinct, valid card indices")
     hand = apply_boss_debuffs(state)
     if any(j.name in MUTATES_CARDS for j in state.jokers):  # copy only when a joker modifies cards
         hand = [replace(c) for c in hand]
@@ -273,9 +292,14 @@ def score(state, played_idx, verbose=False):
 
     jokers = [replace(j, vars={**(J.get(j.name).defaults if J.get(j.name) else {}), **j.vars})
               for j in state.jokers]
+    if boss == "The Hook" and held:
+        # the Hook's discard runs the discard context before scoring (vanilla): Green Joker loses 1 first
+        for j in jokers:
+            if j.name == "Green Joker" and not j.debuff:
+                j.vars["mult"] = max(0, j.vars["mult"] - 1)
     ctx = Ctx(state, played, scoring, held, hand_type, contains, flags, jokers=jokers, verbose=verbose,
               prob=2 ** sum(1 for j in state.jokers if j.name == "Oops! All 6s" and not j.debuff),
-              final_hand=state.hands_left <= 1)
+              final_hand=state.hands_left <= 1, rng=rng)
     if boss == "The Arm":
         ctx.extra["level_up"] = -1 if state.level(hand_type) > 1 else 0
 
@@ -290,12 +314,15 @@ def score(state, played_idx, verbose=False):
             continue
         reps = 1 + (card.seal == "red") + _run(ctx, "retrigger", card, "play")
         for _ in range(reps):
+            ctx.extra["lucky_triggered"] = False
             ctx.add_chips(card.chip_bonus(), card)
             if card.enhancement == "mult":
                 ctx.add_mult(4, card)
             elif card.enhancement == "lucky":
-                ctx.add_mult(20 * ctx.chance(1, 5), card)
-                ctx.add_money(20 * ctx.chance(1, 15))
+                lucky_mult, lucky_money = ctx.chance(1, 5), ctx.chance(1, 15)
+                ctx.extra["lucky_triggered"] = bool(lucky_mult or lucky_money)
+                ctx.add_mult(20 * lucky_mult, card)
+                ctx.add_money(20 * lucky_money)
             elif card.enhancement == "glass":
                 ctx.x_mult(2, card)
             if card.seal == "gold":
@@ -337,7 +364,8 @@ def score(state, played_idx, verbose=False):
     if (state.deck_type or "").startswith("Plasma"):
         ctx.chips = ctx.mult = int((ctx.chips + ctx.mult) / 2)
     return Result(int(ctx.chips * ctx.mult), ctx.chips, ctx.mult, hand_type, scoring, ctx.money, ctx.log,
-                  scoring_idx=scoring_idx)
+                  scoring_idx=scoring_idx, joker_vars=[dict(j.vars) for j in jokers],
+                  level_delta=ctx.extra.get("level_up", 0))
 
 
 def _card_edition(ctx, card):

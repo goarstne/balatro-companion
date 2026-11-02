@@ -4,7 +4,7 @@ from dataclasses import replace
 from balatro.data import HAND_TYPES, JOKER_NAMES
 from balatro.jokers.part_b import _sell_value
 from balatro.models import Joker, State
-from balatro.shop import Offer, ShopAction, _reroll_goal, advise, default_price, evaluate, shop_plan
+from balatro.shop import Offer, ShopAction, _owned_joker_value, _reroll_goal, advise, default_price, evaluate, shop_plan
 from balatro.strategy import (ECON, FLAT, HAND_JOKERS, SCALING, TAG_POINTS, XMULT, _adjust_pack, adjust_offers,
                               blind_choice, economy_note, focus_hand, next_ante_score, required_score, sell_candidates)
 
@@ -52,6 +52,10 @@ def test_blind_choice():
     # Throwback rewards skipping
     with_throwback = State(hand=[], money=10, jokers=[Joker("Throwback", vars={"x": 2}), Joker("Cavendish")])
     assert blind_choice(with_throwback, 2, "small", "Coupon Tag")[0] == "skip"
+    # skipping the Big Blind is checked against the known boss (run 20261101-105644 Z387: The Wall 4x, not 2x)
+    assert "1,600 " in blind_choice(with_throwback, 2, "big", "Negative Tag")[1]
+    wall = replace(with_throwback, upcoming_boss="The Wall")
+    assert "3,200 " in blind_choice(wall, 2, "big", "Negative Tag")[1] and "The Wall" in blind_choice(wall, 2, "big", "Negative Tag")[1]
 
 
 def test_adjust_offers():
@@ -83,7 +87,10 @@ def test_sell_candidates():
                                Joker("Greedy Joker", eternal=True)])
     assert sell_candidates(s, 1) == []
     late = dict(sell_candidates(s, 7))
-    assert set(late) == {0, 2}, late
+    assert set(late) == {0}, late  # Golden Joker (Tier A): no blanket "econ is useless late" rule any more
+    # DNA never triggers under the autopilot (run 201325: +0% for 7 rounds) -> replaceable, not Tier S
+    dna = State(hand=[], jokers=[Joker("Misprint"), Joker("DNA"), Joker("Hiker")])
+    assert set(dict(sell_candidates(dna, 4))) == {1}
 
 
 def test_weak_run_buys_under_25():
@@ -127,6 +134,7 @@ def test_full_slots_sell_then_buy():
     plan = shop_plan(s, items, ante=5, samples=15)
     kinds = [a.kind for a in plan]
     assert kinds == ["sell", "buy", "leave"], plan
+    assert "score/hand after the swap" in plan[0].why, plan  # net gain, sold joker's share included
     assert plan[0].index != 0 and not s.jokers[plan[0].index].eternal  # eternal index 0 untouched
     assert plan[1].index == 0
 
@@ -139,6 +147,18 @@ def test_full_slots_sell_then_buy():
     neg_items = [{"kind": "joker", "name": "Cavendish", "price": 9, "edition": "negative"}]
     plan_neg = shop_plan(all_eternal, neg_items, ante=5, samples=10)
     assert [a.kind for a in plan_neg] == ["buy", "leave"], plan_neg
+
+
+def test_swap_checked_against_upcoming_boss():
+    """Run 20261101-081407 Z99: Blue Joker sold for Ride the Bus (-54%/hand) before The Wall (20,000), lost."""
+    d = {"hand": [], "money": 45, "hands_left": 6, "jokers": [
+        {"name": "Obelisk", "vars": {"xmult": 1.6}}, {"name": "Blue Joker"},
+        {"name": "Swashbuckler", "edition": "holo", "vars": {"mult": 7}}, {"name": "Misprint"}, {"name": "Hanging Chad"}],
+        "played_counts": {"Full House": 1, "Flush": 2, "Pair": 3, "High Card": 3, "Straight": 2, "Two Pair": 3,
+                          "Three of a Kind": 3}, "vouchers": ["Clearance Sale", "Planet Merchant", "Grabber"]}
+    items = [{"kind": "joker", "name": "Ride the Bus", "price": 4}]
+    assert "sell" not in [a.kind for a in shop_plan(State.from_dict({**d, "upcoming_boss": "The Wall"}), items, ante=4,
+                                                     samples=15, auto=True)]
 
 
 def test_reroll_only_with_goal_and_money():
@@ -262,6 +282,18 @@ def test_vouchers_bought():
     assert "buy" not in [a.kind for a in shop_plan(State(hand=[], money=15, jokers=j), ball, ante=2, samples=10, auto=True)]
 
 
+def test_downrated_voucher_only_from_idle_money():
+    """Run 20261101-203240 move 85 (A7): Wasteful ($5, value 6-3 "build avoids discards") bought next to Green
+    Joker, $13 -> $8 - the late-ante interest weight rounded the lost step to 0."""
+    from balatro.shop import _min_buy_value
+    s = State(hand=[], money=13, jokers=[Joker("Green Joker", vars={"mult": 37}), Joker("Droll Joker")])
+    waste = adjust_offers(s, [Offer("voucher", "Wasteful", 5, 6, "voucher (permanent)")], 7)[0]
+    assert waste.value == 3, waste
+    assert waste.value < _min_buy_value(s, waste, 13, 5, 7, est=70000, need_curr=52500, need_next=110000)
+    # above the interest cap the money is idle: still bought
+    assert waste.value >= _min_buy_value(s, waste, 40, 5, 7, est=70000, need_curr=52500, need_next=110000)
+
+
 def test_interest_weighs_less_late():
     """Run 20261031-074053: from ante 5 hardly any rounds left for interest, none in Endless Mode (ante 9+)."""
     from balatro.shop import _lost_steps
@@ -315,6 +347,26 @@ def test_urgent_reroll_keeps_floor():
     assert "scoring joker" in _reroll_goal(s, 6, 24000, 40000, 0, 2, 20, 5)
 
 
+def test_swap_target_is_the_best_replacement():
+    """Run 20261101-212446 Z293: only Banner (lowest value, -42%) was tried for Smiley Face; ~$60 rerolled."""
+    import json
+    from pathlib import Path
+    d = json.loads((Path(__file__).parent / "fixtures/shop_212446_293.json").read_text())
+    plan = shop_plan(State.from_dict(d), d["shop"], d["ante"], reroll_cost=9, auto=True)
+    assert plan[0].kind == "sell" and "Half Joker" in plan[0].why and "Smiley Face" in plan[0].why, plan
+
+
+def test_reroll_for_xmult_with_flat_jokers():
+    """Run 20261101-112941 Z132: A5, $48, five flat +mult jokers, no xMult - rerolled for planets instead."""
+    js = [Joker(n) for n in ("Green Joker", "Gluttonous Joker", "Scary Face", "Droll Joker", "Crafty Joker")]
+    s = State(hand=[], money=48, jokers=js)
+    assert "xMult" in _reroll_goal(s, 5, 32557, 22000, 0, 1, 48, 5, weakest=3.5)
+    assert "xMult" not in _reroll_goal(s, 5, 32557, 22000, 0, 1, 48, 5, weakest=9)  # nothing weak to swap
+    assert _reroll_goal(State(hand=[], money=48), 5, 32557, 22000, 1, 1, 48, 5) is not None  # free slot
+    assert _reroll_goal(State(hand=[], money=48, jokers=[Joker("Photograph")] * 5), 5, 32557, 22000, 0, 1, 48,
+                        5, weakest=9) is None  # no clear focus: no planet reroll
+
+
 def test_sell_only_if_replan_buys():
     """Run 20261031-082933 moves 80/81: Blue Joker sold for Zany Joker, then Zany left in the shop for interest."""
     js = [Joker("Blue Joker"), Joker("Vampire"), Joker("Ice Cream", vars={"chips": 75}), Joker("Lusty Joker"),
@@ -345,6 +397,27 @@ def test_no_swap_that_leaves_boss_short():
     assert "sell" not in [a.kind for a in plan], plan
 
 
+def test_no_swap_for_static_joker_that_scores_less():
+    """Run 20261101-105644 move 168: Abstract Joker sold for Smeared Joker (-16%/hand, Two Pair focus)."""
+    enh = {"AC": "bonus", "JC": "mult", "9D": "glass", "AD": "mult", "JD": "mult", "10H": "bonus", "QS": "mult"}
+    deck = [{"rank": r, "suit": s, **({"enhancement": enh[r + s]} if r + s in enh else {})}
+            for s in "CDHS" for r in ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]]
+    deck = [c for c in deck if c["rank"] + c["suit"] not in ("QD", "QH", "AH")]  # Death/Cryptid copies instead
+    deck += [{"rank": "J", "suit": "D", "enhancement": "mult"}] * 2 + [{"rank": "10", "suit": "H", "enhancement": "bonus"},
+             {"rank": "K", "suit": "D"}, {"rank": "K", "suit": "D"}]
+    d = {"hand": [], "money": 45, "full_deck": deck, "jokers": [
+        {"name": "Abstract Joker"}, {"name": "Green Joker", "vars": {"mult": 20}}, {"name": "Odd Todd"},
+        {"name": "Hanging Chad"}, {"name": "Gros Michel"}],
+        "hand_levels": {h: 2 for h in ("Flush", "Pair", "High Card", "Straight", "Three of a Kind", "Full House",
+                                       "Four of a Kind", "Straight Flush")} | {"Two Pair": 4},
+        "vouchers": ["Reroll Surplus"], "upcoming_boss": "The Hook", "blind_col": 0, "round_hand_types": ["Two Pair"],
+        "played_counts": {"Pair": 3, "High Card": 6, "Straight": 3, "Two Pair": 12, "Four of a Kind": 1}}
+    items = [{"kind": "joker", "name": "Smeared Joker", "price": 7}, {"kind": "joker", "name": "Shoot the Moon", "price": 5},
+             {"kind": "voucher", "name": "Director's Cut", "price": 10}, {"kind": "booster_pack", "name": "Jumbo Buffoon Pack", "price": 6}]
+    plan = shop_plan(State.from_dict(d), items, ante=5, reroll_cost=6, samples=40, auto=True)
+    assert "sell" not in [a.kind for a in plan], plan
+
+
 def test_free_negative_joker_always_taken():
     """Run 20261031-094727 move 242: Diet Cola ($0, negative from the Negative Tag) left in the shop – value 5 < threshold 7.5."""
     js = [Joker("Delayed Gratification"), Joker("Runner", vars={"chips": 105}), Joker("Half Joker"),
@@ -358,6 +431,13 @@ def test_free_negative_joker_always_taken():
     assert "buy" not in [a.kind for a in shop_plan(s, paid, ante=7, samples=15, auto=True)]
     rental = [dict(cola[0], rental=True)]
     assert "buy" not in [a.kind for a in shop_plan(s, rental, ante=7, samples=15, auto=True)]
+
+
+def test_rental_bought_when_it_rescues_a_weak_run():
+    """docs/research/strategies.md 4.3: $1 + 3×$3 is worth it when the run can't win without it."""
+    weak = State(hand=[], money=6, jokers=[Joker("Joker")])
+    rental = [{"kind": "joker", "name": "Cavendish", "price": 1, "rental": True}]
+    assert [a.kind for a in shop_plan(weak, rental, ante=2, samples=15, auto=True)] == ["buy", "leave"]
 
 
 def test_telescope_needs_most_played_focus():
@@ -387,6 +467,80 @@ def test_no_joker_reroll_when_nothing_replaceable():
     weak = replace(s, jokers=[Joker("Joker")] + js[1:])
     plan = shop_plan(weak, [], ante=10, reroll_cost=5, samples=15, auto=True)
     assert plan[0].kind == "reroll" and "joker" in plan[0].why, plan
+
+
+def test_madness_costs_the_jokers_it_destroys():
+    """Run 20261101-094338 Z90: Erosion sold for Madness next to Vampire + Baseball Card; Madness then destroyed
+    11 jokers (Vampire Z97, Baseball Card, Hologram, Hanging Chad ...)."""
+    js = [Joker("Baseball Card"), Joker("Blackboard"), Joker("Vampire", vars={"xmult": 1.2}), Joker("Erosion"),
+          Joker("Seeing Double")]
+    s = State(hand=[], money=47, jokers=js, hand_size=8, hands_left=6, played_counts={"Pair": 8, "Three of a Kind": 3})
+    plan = shop_plan(s, [{"kind": "joker", "name": "Madness", "price": 7}], ante=4, samples=15, auto=True)
+    assert "sell" not in [a.kind for a in plan], plan
+    alone = adjust_offers(replace(s, jokers=[Joker("Vampire", eternal=True)]), [Offer("joker", "Madness", 7, 8, "x")], 4)[0]
+    risky = adjust_offers(replace(s, jokers=[Joker("Vampire")]), [Offer("joker", "Madness", 7, 8, "x")], 4)[0]
+    assert risky.value == alone.value - 2.0 and "destroys jokers" in risky.why, (alone, risky)
+
+
+def test_dead_passive_joker_is_swapped_first():
+    """Run 20261101-203240 moves 172-175 (A9): Oops! All 6s without any probability joker kept a slot as Tier A,
+    so Photograph (+24%, $2) was left for rerolls; The Water lost 186,020/220,000. Same from move 60 on
+    (Ice Cream +42% Z115-122, Blackboard +57% Z138, Stuntman +92% Z214)."""
+    rows = ["10S QC KS JS:wild AC:mult 9S 8S 7S 6C:wild 5S 4S 3S 2S", "10H QH KH JC AC 9H 8H 7H 6C 5H 4H 3H 2H",
+            "10D QD:steel KD JD:steel AD:mult 9D 8D 7D 6D 5D 4D 3D 2D",
+            "10C QC:gold KC:steel JD:steel AC 9C 8C 7C 6C 5C 4C 3C 2C KC KC"]
+    deck = [{"rank": c.split(":")[0][:-1], "suit": c.split(":")[0][-1],
+             **({"enhancement": c.split(":")[1]} if ":" in c else {})} for r in rows for c in r.split()]
+    d = {"hand": [], "money": 37, "full_deck": deck, "joker_slots": 6, "hand_size": 9, "hands_left": 6,
+         "discards_left": 4, "deck_type": "Blue Deck", "upcoming_boss": "The Water", "blind_col": 0,
+         "jokers": [{"name": "Oops! All 6s"}, {"name": "Crafty Joker", "edition": "foil"},
+                    {"name": "Droll Joker", "edition": "poly"}, {"name": "Green Joker", "vars": {"mult": 54}},
+                    {"name": "Four Fingers"}, {"name": "Shortcut", "edition": "negative"}],
+         "hand_levels": {"Flush": 7, "Pair": 3, "Straight": 2, "Two Pair": 4},
+         "played_counts": {"Full House": 2, "Flush": 21, "Pair": 8, "Straight Flush": 1, "Straight": 3,
+                           "Two Pair": 14, "High Card": 8},
+         "vouchers": ["Tarot Merchant", "Liquidation", "Clearance Sale", "Wasteful", "Grabber", "Paint Brush"]}
+    items = [{"kind": "joker", "name": "Photograph", "price": 2},
+             {"kind": "booster_pack", "name": "Standard Pack", "price": 2},
+             {"kind": "booster_pack", "name": "Jumbo Arcana Pack", "price": 3}]
+    s = State.from_dict(d)
+    plan = shop_plan(s, items, ante=9, reroll_cost=5, samples=40, auto=True)
+    assert [(a.kind, a.index) for a in plan[:2]] == [("sell", 0), ("buy", 0)], plan
+    # with a probability joker to double, Oops! keeps its tier and Crafty Joker is the weakest again
+    hands = [s.get_full_deck()[:9]]
+    with_dice = replace(s, jokers=s.jokers[:4] + [Joker("Bloodstone")] + s.jokers[5:])
+    assert _owned_joker_value(with_dice, 0, 9, hands) > _owned_joker_value(s, 0, 9, hands)
+
+
+def test_vampire_needs_enhanced_cards():
+    """Run 20261101-205435 move 320 (A8): Odd Todd (holo) sold for Vampire at -35% score/hand; the deck held
+    3 enhanced cards (Steel K for Baron, 2 Bonus), Vampire stayed at x1.3 for the rest of the run."""
+    enh = {"KC": "steel", "3D": "bonus", "3S": "bonus"}
+    deck = [{"rank": r, "suit": s, **({"enhancement": enh[r + s]} if r + s in enh else {})}
+            for s in "CDHS" for r in ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")]
+    d = {"hand": [], "money": 39, "full_deck": deck, "hand_size": 8, "hands_left": 6, "discards_left": 4,
+         "deck_type": "Blue Deck", "upcoming_boss": "Verdant Leaf", "consumables": ["The World"],
+         "jokers": [{"name": "Baron"}, {"name": "Half Joker"}, {"name": "Odd Todd", "edition": "holo"},
+                    {"name": "Card Sharp"}, {"name": "Photograph", "edition": "poly"}],
+         "hand_levels": {"Flush": 3, "Pair": 10, "High Card": 3, "Straight": 4, "Three of a Kind": 3},
+         "played_counts": {"Full House": 1, "Flush": 1, "Pair": 41, "High Card": 3, "Straight": 1, "Two Pair": 2},
+         "vouchers": ["Grabber", "Wasteful"], "phase": "shop", "telemetry": True, "blind_chips": 0, "score": 0,
+         "ante": 8, "round": 22, "reroll_cost": 6, "joker_slots": 5, "blind_col": 0, "round_hand_types": ["Pair"],
+         "last_tarot_planet": "Mercury", "small_tag": "Investment Tag", "big_tag": "Coupon Tag"}
+    items = [{"kind": "joker", "name": "Runner", "price": 5, "edition": None},
+             {"kind": "joker", "name": "Vampire", "price": 7, "edition": None},
+             {"kind": "voucher", "name": "Reroll Surplus", "price": 10, "edition": None},
+             {"kind": "booster_pack", "name": "Standard Pack", "price": 4, "edition": None},
+             {"kind": "booster_pack", "name": "Jumbo Standard Pack", "price": 6, "edition": None}]
+    plan = shop_plan(State.from_dict(d), items, ante=8, reroll_cost=6, samples=40, auto=True)
+    assert "sell" not in [a.kind for a in plan], plan
+    # a deck full of enhanced cards feeds it: the swap goes through
+    for c in deck[:26]:
+        c.setdefault("enhancement", "bonus")
+    # Isolate the feed-value check; boss-aware safety is tested separately.
+    d["upcoming_boss"] = None
+    plan = shop_plan(State.from_dict(d), items, ante=8, reroll_cost=6, samples=40, auto=True)
+    assert [a.kind for a in plan[:2]] == ["sell", "buy"] and plan[1].index == 1, plan
 
 
 if __name__ == "__main__":

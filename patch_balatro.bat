@@ -74,7 +74,7 @@ Write-Host ("EXE-Header: {0} Bytes | Spiel-Archiv: {1} Bytes" -f $zipStart, ($ra
 # 3. Lua telemetry hook (after G:draw() it draws the compressed game state as a strip of 4x4 blocks)
 $luaHook = @'
 
--- BALATRO_TELEMETRY_V2
+-- BALATRO_TELEMETRY_V3
 do
   local _orig_draw = love.draw
   local _bit = require("bit")
@@ -116,7 +116,10 @@ do
   local function _tok(c)  -- deck card: "KS" or "KS/<enhancement>/<edition>/<seal>"
     local t = _rank(c) .. _suit(c)
     local e, d, s = _enh(c), _ed(c), string.lower(c.seal or "")
-    if e ~= "" or d ~= "" or s ~= "" then t = t .. "/" .. e .. "/" .. d .. "/" .. s end
+    local ab = c.ability or {}
+    if e ~= "" or d ~= "" or s ~= "" or (ab.perma_bonus or 0) ~= 0 or ab.played_this_ante then
+      t = t .. "/" .. e .. "/" .. d .. "/" .. s .. "/" .. tostring(ab.perma_bonus or 0) .. "/" .. (ab.played_this_ante and "1" or "0")
+    end
     return t
   end
 
@@ -172,14 +175,28 @@ do
       _clean(gm.selected_back and gm.selected_back.name),
       bl.disabled and 1 or 0, bcol, t_used)}
 
+    local ready = false
+    if phase == "cash_out" then
+      for _, box in ipairs(G.I and G.I.UIBOX or {}) do
+        local button = box.get_UIE_by_ID and box:get_UIE_by_ID("cash_out_button")
+        if button and button.config and button.config.button == "cash_out" then ready = true; break end
+      end
+    end
+    local rr, rb = gm.round_resets or {}, gm.round_bonus or {}
+    lines[#lines+1] = string.format("M\t3\t%s\t%d\t%d\t%d\t%d\t%d\t%d",
+      _clean(gm.pseudorandom and gm.pseudorandom.seed), gm.stake or 1,
+      math.max(1, (rr.hands or 4) + (rb.next_hands or 0)),
+      math.max(0, (rr.discards or 3) + (rb.discards or 0)), cr.discards_used or 0,
+      ready and 1 or 0, gm.won and 1 or 0)
+
     for _, c in ipairs(_cards_sorted(G.hand)) do
       local fx, fy = _pos(c, W, H)
       local ab = c.ability or {}
-      lines[#lines+1] = string.format("H\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.4f\t%.4f",
+      lines[#lines+1] = string.format("H\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.4f\t%.4f\t%d",
         _rank(c), _suit(c), _enh(c), _ed(c), string.lower(c.seal or ""),
         c.debuff and 1 or 0, (c.facing == "back") and 1 or 0,
         ab.forced_selection and 1 or 0, math.floor(ab.perma_bonus or 0),
-        c.highlighted and 1 or 0, fx, fy)
+        c.highlighted and 1 or 0, fx, fy, ab.played_this_ante and 1 or 0)
     end
 
     for _, c in ipairs(_cards_sorted(G.jokers)) do
@@ -266,12 +283,12 @@ do
     end
     if #vs > 0 then lines[#lines+1] = "V\t" .. table.concat(vs, "\t") end
 
-    -- X: last tarot/planet (The Fool), upcoming boss, skip tags of Small/Big
+    -- X: last tarot/planet (The Fool), upcoming boss, skip tags of Small/Big, The Ox's hand (set after each boss)
     local rr = gm.round_resets or {}
     local bc, bt = rr.blind_choices or {}, rr.blind_tags or {}
-    lines[#lines+1] = string.format("X\t%s\t%s\t%s\t%s",
+    lines[#lines+1] = string.format("X\t%s\t%s\t%s\t%s\t%s",
       _cname(G.P_CENTERS, gm.last_tarot_planet), _cname(G.P_BLINDS, bc.Boss),
-      _cname(G.P_TAGS, bt.Small), _cname(G.P_TAGS, bt.Big))
+      _cname(G.P_TAGS, bt.Small), _cname(G.P_TAGS, bt.Big), _clean(cr.most_played_poker_hand))
     lines[#lines+1] = _deck("F", G.playing_cards)          -- whole deck
     if phase == "playing" then lines[#lines+1] = _deck("D", G.deck and G.deck.cards) end  -- draw pile
 

@@ -46,7 +46,7 @@ def test_log_move():
         Image.fromarray(img[:, :, ::-1]).save(png)
         live.log_move(Path(t) / "run", png, {"phase": "shop"}, "x", None, True, "ok")
         live.log_move(Path(t) / "run", png, {"phase": "shop"}, "x", None, True, "ok")
-        assert sorted(p.name for p in (Path(t) / "run").iterdir()) == ["000.jpg", "001.jpg", "moves.jsonl"]
+        assert sorted(p.name for p in (Path(t) / "run").iterdir()) == ["000.jpg", "001.jpg", "moves.jsonl", "run.json"]
         assert decode_strip(normalize(Path(t) / "run" / "001.jpg"))[0]["money"] == 17
 
 

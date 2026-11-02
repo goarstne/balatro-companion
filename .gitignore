@@ -1,4 +1,8 @@
 .venv/
+*.egg-info/
+build/
+dist/
+.playwright-mcp/
 __pycache__/
 state.json
 .claude/scheduled_tasks.lock

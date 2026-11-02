@@ -63,6 +63,10 @@ def test_request_offline():
     """Full SDK round trip against a mock transport: checks the request body the API would get."""
     import os
 
+    import importlib.util
+    if not importlib.util.find_spec("anthropic"):
+        print("SDK test skipped (install .[claude])")
+        return
     import anthropic
     import httpx2
 

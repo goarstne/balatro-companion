@@ -5,8 +5,8 @@ A play whose engine prediction misses that delta is an engine bug (or missing jo
 tests/learned/ as a case test_learned.py replays; fix the engine until those pass.
 
 improve() then hands the run to Claude Opus (claude -p, subscription login) working on a throw-away copy of the
-project: it reads the run, changes code, runs the tests and leaves a patch + report. Nothing reaches the real
-tree until `python -m balatro learn --apply` (a human gate: one run is mostly luck).
+project: it reads the run, changes code, runs the tests and leaves a patch + report. A green patch is re-tested
+and applied automatically, as approved by the user. These checks do not establish a win-rate improvement.
 """
 import json
 import shutil
@@ -19,7 +19,9 @@ from pathlib import Path
 from .engine import score
 from .models import State
 
-CASES = Path(__file__).resolve().parent.parent / "tests" / "learned"
+_PROJECT = Path(__file__).resolve().parent.parent
+CASES = (_PROJECT / "tests" / "learned" if (_PROJECT / "tests/test_engine.py").is_file()
+         else Path.home() / ".local/share/balatro/regressions")
 # EV-scored randomness: a single draw can't confirm the engine (strategy design: random effects = expected value)
 RANDOM_JOKERS = {"Misprint", "Bloodstone", "Space Joker"}
 # money won at random during the hand feeds money-scaled jokers: the real score drifts from the expectation
@@ -90,7 +92,8 @@ def evaluate(moves):
         pred = score(State.from_dict(m["state"]), m["idx"]).score  # re-score: the engine may have been fixed since
         if abs(pred - actual) > max(1, 0.01 * actual):
             miss.append({"n": m["n"], "hand_type": m["hand_type"], "predicted": pred, "actual": actual})
-    fails = Counter(m["msg"].split(" – ")[0][:70] for m in moves if not m["ok"] and "no automatic action" not in m["msg"])
+    from .runs import failed_action
+    fails = Counter(m["msg"].split(" – ")[0][:70] for m in moves if failed_action(m))
     # round -> [ante, blind, best score, chips needed, fewest hands left]; cash_out frames keep the score but
     # already count the next ante after a boss, so key by the (global) round counter
     blinds = {}
@@ -109,7 +112,7 @@ def evaluate(moves):
 
 def save_cases(moves, report, run_name):
     """Mismatched plays -> tests/learned/<run>-<n>.json (state, played indices, the game's real score)."""
-    CASES.mkdir(exist_ok=True)
+    CASES.mkdir(parents=True, exist_ok=True)
     byn = {m["n"]: m for m in moves}
     for x in report["mismatches"]:
         m = byn[x["n"]]
@@ -155,8 +158,9 @@ def run(path=None, save=True):
 ROOT = Path(__file__).resolve().parent.parent
 LEARNINGS = Path.home() / ".local/share/balatro/learnings.md"  # hypotheses carried from run to run
 MODEL = "claude-opus-5-5"
-TESTS = ["test_engine", "test_part_a", "test_part_b", "test_packs", "test_strategy", "test_autopilot", "test_live",
-         "test_learned", "test_optimizer"]  # the local-vision tests need the dataset and are slow; Opus mustn't touch vision
+from .checks import modules
+
+TESTS = modules(core=True)
 TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"] + [f"Bash(.venv/bin/python -m tests.{t})" for t in TESTS]
 
 PROMPT = """You are improving the Balatro autopilot in this directory (a throwaway copy of the project; your changes \
@@ -252,7 +256,11 @@ def _workspace(run):
 
 def improve(path=None):
     """Run -> Opus works on a copy -> run/opus.md (report) + run/opus.patch (tested diff). -> short status text."""
+    if not TESTS:
+        return "Autolearner requires the project checkout with its test suite."
     rd = Path(path) if path else latest_run()
+    if rd is None:
+        return "No recorded run found."
     if not (rd / "report.txt").exists():
         run(rd)
     work = _workspace(rd)
@@ -288,31 +296,48 @@ def improve(path=None):
 def apply(name, root=ROOT):
     """Apply a run's Opus patch to the real tree, re-run the suite there, and commit only the patched files plus a
     docs/CHANGELOG.md entry; a red suite rolls the patch back. name: run name or directory."""
+    if not TESTS:
+        return "Autolearner requires the project checkout with its test suite."
     from .live import RUNS
     rd = Path(name) if Path(name).is_dir() else RUNS / name
     patch = rd / "opus.patch"
     if not patch.exists() or not patch.read_text().strip():
         return f"No patch for {rd.name}."
+    files = sorted({l[6:] for l in patch.read_text().splitlines() if l.startswith(("+++ b/", "--- a/"))})
+    log = root / "docs" / "CHANGELOG.md"
+    paths = sorted(set(files + [str(log.relative_to(root))]))
+    dirty = subprocess.run(["git", "status", "--porcelain", "--", *paths], cwd=root,
+                           capture_output=True, text=True, check=True).stdout
+    if dirty:
+        return "Patch not taken: affected files have local changes.\n" + dirty
+    previous_log = log.read_bytes() if log.exists() else None
     r = subprocess.run(["git", "apply", str(patch)], cwd=root, capture_output=True, text=True)
     if r.returncode:
         return "Patch no longer applies (not taken):\n" + r.stderr.strip()
-    failed = [t for t in TESTS if subprocess.run([sys.executable, "-m", f"tests.{t}"], cwd=root,
-                                                  capture_output=True, timeout=600).returncode]
-    if failed:
+    try:
+        failed = [t for t in TESTS if subprocess.run([sys.executable, "-m", f"tests.{t}"], cwd=root,
+                                                      capture_output=True, timeout=180).returncode]
+        if failed:
+            raise RuntimeError("red in the project: " + ", ".join(failed))
+        report = (rd / "opus.md").read_text() if (rd / "opus.md").exists() else ""
+        changes = report.split("## Changes", 1)[1].split("\n## ", 1)[0].strip() if "## Changes" in report else ""
+        entry = (f"\n## {datetime.now():%Y-%m-%d %H:%M} – autolearner, run {rd.name}\n\n"
+                 f"Applied automatically (tests green). Files: {', '.join(files)}\n\n{changes}\n")
+        log.parent.mkdir(exist_ok=True)
+        log.write_text((previous_log.decode() if previous_log is not None else "# Changelog\n") + entry)
+        subprocess.run(["git", "add", "--", *paths], cwd=root, check=True)
+        msg = (f"Autolearner run {rd.name}: Opus patch, auto-applied (tests green)\n\n{changes[:3000]}\n\n"
+               "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+        subprocess.run(["git", "commit", "-q", "-m", msg, "--", *paths], cwd=root,
+                       capture_output=True, text=True, check=True)
+    except BaseException as error:
         subprocess.run(["git", "apply", "-R", str(patch)], cwd=root, check=True)
-        return "Patch rolled back, red in the project: " + ", ".join(failed)
-    files = sorted({l[6:] for l in patch.read_text().splitlines() if l.startswith("+++ b/")})
-    report = (rd / "opus.md").read_text() if (rd / "opus.md").exists() else ""
-    changes = report.split("## Changes", 1)[1].split("\n## ", 1)[0].strip() if "## Changes" in report else ""
-    log = root / "docs" / "CHANGELOG.md"
-    entry = (f"\n## {datetime.now():%Y-%m-%d %H:%M} – autolearner, run {rd.name}\n\n"
-             f"Applied automatically (tests green). Files: {', '.join(files)}\n\n{changes}\n")
-    log.parent.mkdir(exist_ok=True)
-    log.write_text((log.read_text() if log.exists() else "# Changelog\n") + entry)
-    paths = files + [str(log.relative_to(root))]
-    subprocess.run(["git", "add", "--", *paths], cwd=root, check=True)
-    msg = (f"Autolearner run {rd.name}: Opus patch, auto-applied (tests green)\n\n{changes[:3000]}\n\n"
-           "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
-    c = subprocess.run(["git", "commit", "-q", "-m", msg, "--", *paths], cwd=root, capture_output=True, text=True)
-    return (f"Applied and committed ({', '.join(files)}); the autopilot reloads the code at the next run."
-            if c.returncode == 0 else "Applied, commit failed:\n" + c.stderr.strip())
+        if previous_log is None:
+            log.unlink(missing_ok=True)
+        else:
+            log.write_bytes(previous_log)
+        subprocess.run(["git", "reset", "-q", "HEAD", "--", *paths], cwd=root, check=True)
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        return f"Patch rolled back, {error}"
+    return f"Applied and committed ({', '.join(files)}); the autopilot reloads the code at the next run."

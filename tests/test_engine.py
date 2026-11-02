@@ -75,6 +75,14 @@ def main():
     assert sc({"hand": ["2H", "3D", "4S", "5C", "6C"], "jokers": ["Flower Pot"], "blind": "The Head"}, range(5)) == 576
     assert sc({"hand": [{"rank": "K", "suit": "S", "enhancement": "stone"}], "jokers": ["Pareidolia", "Scary Face"]}, [0]) == 85
     assert sc({"hand": ["KS"], "jokers": [{"name": "Mime", "debuff": True}, "Baseball Card"]}, [0]) == 22
+    # The Hook's discard costs Green Joker 1 mult before its +1 (run 20261031-125000 #392: 211,865 not 218,700)
+    green = {"name": "Green Joker", "vars": {"mult": 5}}
+    hook = {"hand": ["AS", "AH", "3C", "4D"], "jokers": [green], "blind": "The Hook"}
+    assert sc(hook, [0, 1]) == 32 * (2 + 5)
+    assert sc({**hook, "hand": ["AS", "AH"]}, [0, 1]) == 32 * (2 + 6)  # nothing held: nothing discarded
+    import random
+    from balatro.optimizer import _after_play
+    assert _after_play(State.from_dict(hook), (0, 1), random.Random(0))[2].score == 32 * 7  # applied once
     from balatro.optimizer import _discard_candidates, best_plays
     s = State.from_dict({"hand": ["2S", "2H", "3C", "5D", "7S", "9H", "JC", "KD"]})
     pair_keep = [d for label, d in _discard_candidates(s, best_plays(s)) if label == "keep Pair"]

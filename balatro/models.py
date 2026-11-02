@@ -18,6 +18,7 @@ class Card:
     bonus: int = 0                  # permanent extra chips (Hiker)
     face_down: bool = False
     forced: bool = False            # Cerulean Bell: must be played
+    played_this_ante: bool = False
 
     @property
     def stone(self):
@@ -131,6 +132,14 @@ class State:
     round_hand_types: list = field(default_factory=list)  # hand types played this round
     boss_disabled: bool = False
     last_tarot_planet: str | None = None  # The Fool copies it (telemetry)
+    upcoming_boss: str | None = None  # this ante's boss, known in the shop (telemetry)
+    ox_hand: str | None = None  # The Ox's hand, fixed at the end of the last boss round (telemetry)
+    seed: str | None = None
+    stake: int | None = None
+    round_hands: int | None = None
+    round_discards: int | None = None
+    discards_used: int | None = None
+    telemetry: bool = False
 
     @classmethod
     def from_dict(cls, d):

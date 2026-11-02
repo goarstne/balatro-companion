@@ -127,6 +127,22 @@ class Pointer:
             if state:
                 time.sleep(hold)  # nothing to wait for after the release
 
+    def drag(self, start, end, duration=0.6):
+        """Hold the card while emitting motion events; always release, including on interruption."""
+        move_cursor(*start)
+        self.nudge()
+        self._send(5, 2, struct.pack("III", self._ms(), BTN_LEFT, 1))
+        self._send(5, 4, b"")
+        try:
+            time.sleep(0.12)
+            for step in range(1, 13):
+                move_cursor(*(a + (b - a) * step / 12 for a, b in zip(start, end)))
+                self.nudge()
+                time.sleep(duration / 12)
+        finally:
+            self._send(5, 2, struct.pack("III", self._ms(), BTN_LEFT, 0))
+            self._send(5, 4, b"")
+
     def close(self):
         self._send(5, 8, b"")  # destroy
         self.s.close()
