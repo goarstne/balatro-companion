@@ -18,11 +18,18 @@ def _str(s):
     return struct.pack("I", len(b)) + b + b"\0" * (-len(b) % 4)
 
 
+def runtime_dir():
+    try:
+        return os.environ["XDG_RUNTIME_DIR"]
+    except KeyError:
+        raise RuntimeError("XDG_RUNTIME_DIR is not set - a Wayland session is required") from None
+
+
 def hypr_request(cmd):
     """One Hyprland IPC request ("j/clients", "dispatch ...") -> response text. Falls back to hyprctl."""
     try:
         path = os.path.join(os.environ["XDG_RUNTIME_DIR"], "hypr", os.environ["HYPRLAND_INSTANCE_SIGNATURE"],
-                            ".socket.sock")
+                            ".socket.sock")  # KeyError (not in a Hyprland session) falls back to hyprctl
         with socket.socket(socket.AF_UNIX) as s:
             s.settimeout(2)
             s.connect(path)
@@ -35,7 +42,7 @@ def hypr_request(cmd):
         args = cmd.split(" ", 1)
         if args[0].startswith("j/"):
             args = [args[0][2:], "-j"] + args[1:]
-        r = subprocess.run(["hyprctl", *args], capture_output=True, text=True)
+        r = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=5)
         return r.stdout if r.returncode == 0 or args[0] != "dispatch" else "error: " + r.stdout
 
 
@@ -50,7 +57,7 @@ def _dispatch(*variants):
 
 def move_cursor(x, y):
     x, y = round(x), round(y)
-    if not _dispatch("hl.dsp.cursor.move({x=%d,y=%d})" % (x, y), f"movecursor {x} {y}"):
+    if not _dispatch(f"hl.dsp.cursor.move({{x={x},y={y}}})", f"movecursor {x} {y}"):
         raise RuntimeError("Hyprland can't move the cursor")
 
 
@@ -63,13 +70,20 @@ def focus_window_at(x, y):
     if hit is None or hit["address"] == hypr_json("activewindow").get("address"):
         return False
     a = "address:" + hit["address"]
-    return _dispatch('hl.dsp.focus({ window = "%s" })' % a, f"focuswindow {a}")
+    return _dispatch(f'hl.dsp.focus({{ window = "{a}" }})', f"focuswindow {a}")
 
 
 class Pointer:
     def __init__(self):
-        path = os.path.join(os.environ["XDG_RUNTIME_DIR"], os.environ.get("WAYLAND_DISPLAY", "wayland-1"))
+        path = os.path.join(runtime_dir(), os.environ.get("WAYLAND_DISPLAY", "wayland-1"))
         self.s = socket.socket(socket.AF_UNIX)
+        try:
+            self._handshake(path)
+        except BaseException:
+            self.s.close()  # a failed handshake must not leak the socket
+            raise
+
+    def _handshake(self, path):
         self.s.connect(path)
         self._send(1, 1, struct.pack("I", 2))  # wl_display.get_registry -> registry id 2
         self._send(1, 0, struct.pack("I", 3))  # wl_display.sync -> callback id 3
@@ -85,7 +99,7 @@ class Pointer:
                 raise RuntimeError("Wayland error")
         name = globals_.get("zwlr_virtual_pointer_manager_v1")
         if name is None:
-            raise RuntimeError("Compositor bietet keinen virtuellen Zeiger an")
+            raise RuntimeError("The compositor offers no virtual pointer (zwlr_virtual_pointer_manager_v1)")
         # wl_registry.bind(name, new_id<interface, version, id=4>)
         self._send(2, 0, struct.pack("I", name) + _str("zwlr_virtual_pointer_manager_v1") + struct.pack("II", 1, 4))
         self._send(4, 0, struct.pack("II", 0, 5))  # create_virtual_pointer(seat=null, id=5)
@@ -103,7 +117,7 @@ class Pointer:
         while len(buf) < n:
             chunk = self.s.recv(n - len(buf))
             if not chunk:
-                raise RuntimeError("Wayland-Verbindung geschlossen")
+                raise RuntimeError("Wayland connection closed")
             buf += chunk
         return buf
 

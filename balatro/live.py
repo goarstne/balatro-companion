@@ -24,6 +24,7 @@ from PIL import Image, ImageChops, ImageStat
 from .models import State
 from .optimizer import format_recommendation, recommend
 from .pointer import hypr_json
+from .runs import ROOT, RUNS
 from .shop import advise
 from .learn import game_over, improve, played, run as learn
 from .vision import recognize
@@ -142,18 +143,17 @@ def state_key(d, confs=None):
 DATASET = Path.home() / ".local/share/balatro/dataset"
 LOG = Path.home() / ".local/share/balatro/autopilot.log"
 SAMPLES = Path.home() / ".local/share/balatro/samples"
-RUNS = Path.home() / ".local/share/balatro/runs"
 
 
 def _head():
-    from .learn import ROOT
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+                          timeout=10).stdout.strip()
 
 
 def resume_run(max_age=600):
     """A restart mid-run keeps logging into the run it interrupted (else the autolearner sees half a run)."""
     from .learn import latest_run, load
-    last = latest_run()
+    last = latest_run(RUNS)  # RUNS looked up here, so tests can point it elsewhere
     if last is None or time.time() - (last / "moves.jsonl").stat().st_mtime > max_age:
         return None
     moves = load(last)
@@ -165,7 +165,10 @@ def log_move(run, path, state, text, rec, ok, msg, version=None, duration=None):
     JPEG q90: ~15x smaller than grim's PNG, the telemetry strip still decodes (tested down to q55)."""
     run.mkdir(parents=True, exist_ok=True)
     log = run / "moves.jsonl"
-    n = sum(1 for line in log.open() if line.strip()) if log.exists() else 0
+    n = 0
+    if log.exists():
+        with log.open(encoding="utf-8") as f:
+            n = sum(1 for line in f if line.strip())
     Image.open(path).convert("RGB").save(run / f"{n:03d}.jpg", quality=90)
     play = rec.play if rec is not None and rec.action == "play" else None
     entry = {"n": n, "t": datetime.now().isoformat(timespec="seconds"), "state": state, "advice": text,
@@ -173,7 +176,7 @@ def log_move(run, path, state, text, rec, ok, msg, version=None, duration=None):
              "idx": list(rec.play_idx if rec.action == "play" else rec.discard.discard_idx) if rec is not None else None,
              "hand_type": play.hand_type if play else None, "predicted": play.score if play else None,
              "ok": ok, "msg": msg, "duration": duration}
-    with open(run / "moves.jsonl", "a") as f:
+    with open(log, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     from .runs import record_metadata
     record_metadata(run, state, version)
@@ -194,10 +197,15 @@ def analyze(path, model, mode="local", memory=None, pre=None, auto=False, detail
     return notes, d, *plan(d, auto, details)
 
 
+class _Restart(Exception):
+    """New code landed between runs: leave all context managers, then re-exec."""
+
+
 def run(a):
     if getattr(a, "hud", False) and a.auto:
         raise RuntimeError("The widget is an advisor. --hud and --auto can't run together.")
     pilots = []  # the autopilot, created on first use; its Wayland pointer is closed on exit
+    restart = False
     try:
         from .control import Control
         with tempfile.TemporaryDirectory(prefix="balatro-live-") as tmp, \
@@ -212,9 +220,14 @@ def run(a):
                 _loop(a, Path(tmp), pilots, hud, control)
     except KeyboardInterrupt:
         print("\nStopped.")
+    except _Restart:
+        restart = True
     finally:
         for p in pilots:
             p.ptr.close()
+    if restart:
+        print("New code in the repo – restarting the autopilot …", flush=True)
+        os.execv(sys.executable, [sys.executable, "-m", "balatro", *sys.argv[1:]])
 
 
 def _loop(a, tmp, pilots, hud=None, control=None):
@@ -353,8 +366,7 @@ def _loop(a, tmp, pilots, hud=None, control=None):
                         learner.join()
                     if a.auto and _head() != head:
                         # an auto-applied patch (or any commit) landed: restart on the new code between runs
-                        print("New code in the repo – restarting the autopilot …", flush=True)
-                        os.execv(sys.executable, [sys.executable, "-m", "balatro", *sys.argv[1:]])
+                        raise _Restart
                 state = new
                 if hud:
                     hud.update(state, text, rec, details, notes, time.time() - started)
@@ -380,7 +392,7 @@ def _loop(a, tmp, pilots, hud=None, control=None):
                     print("Autopilot:", msg)
                     if control:
                         control.consume()
-                    with open(LOG, "a") as f:  # the screen is cleared per analysis: keep a history
+                    with open(LOG, "a", encoding="utf-8") as f:  # the screen is cleared per analysis: keep a history
                         f.write(f"{datetime.now():%H:%M:%S} {text.splitlines()[0]} -> {msg}\n")
                     log_move(run_dir, path, state, text, rec, ok, msg, version, time.time() - started)
                     over_at = time.time() if game_over(state) else None

@@ -5,15 +5,14 @@
 consumable slot now (`index` 0) or keep it (`None`). `targets` are indices into
 `state.hand` (the drawn cards shown in Arcana/Spectral packs) to select before "Use".
 
-Values are German user-facing reasons; a value <= 0 means skip/hold.
+Reasons are short English texts; a value <= 0 means skip/hold.
 """
-import random
 from collections import Counter
 from dataclasses import dataclass, replace
 
 from .data import PLANETS
 from .models import Card, Joker
-from .shop import TIER, TIER_POINTS, _avg_best, _sim_state, consumable_slots
+from .shop import TIER, TIER_POINTS, _avg_best, _sim_state, consumable_slots, sample_hands
 from .strategy import focus_hand
 
 _SAMPLES = 20
@@ -57,9 +56,7 @@ def _free_consumable_slots(state):
 
 
 def _sample_hands(state, samples=_SAMPLES):
-    rng = random.Random(_SEED)
-    deck = state.get_full_deck()
-    return [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(samples)]
+    return sample_hands(state, samples, _SEED)
 
 
 def _focus_rank(state):

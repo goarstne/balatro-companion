@@ -11,6 +11,7 @@ from pathlib import Path
 from .data import BOSSES, HAND_TYPES
 from .models import State
 from .optimizer import card_name
+from .pointer import runtime_dir
 from .shop import consumable_slots
 from .strategy import economy_note, focus_hand, has_clear_focus, interest_of, joker_role, sell_candidates
 
@@ -116,7 +117,7 @@ class Hud:
     def __enter__(self):
         if not shutil.which("quickshell"):
             raise RuntimeError("Quickshell is missing (Omarchy installs it with its shell)")
-        self.lock = open(Path(os.environ["XDG_RUNTIME_DIR"]) / "balatro-hud.lock", "a")
+        self.lock = open(Path(runtime_dir()) / "balatro-hud.lock", "a")
         try:
             fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -151,7 +152,7 @@ class Hud:
         code = self.process.poll()
         if code is not None and code != 0:
             self.log.seek(0)
-            raise RuntimeError("Widget beendet: " + self.log.read()[-3000:])
+            raise RuntimeError("Widget exited: " + self.log.read()[-3000:])
         return code is None
 
     def select(self, client):

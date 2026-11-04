@@ -16,11 +16,12 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from .checks import modules
 from .engine import score
 from .models import State
+from .runs import ROOT, RUNS
 
-_PROJECT = Path(__file__).resolve().parent.parent
-CASES = (_PROJECT / "tests" / "learned" if (_PROJECT / "tests/test_engine.py").is_file()
+CASES = (ROOT / "tests" / "learned" if (ROOT / "tests/test_engine.py").is_file()
          else Path.home() / ".local/share/balatro/regressions")
 # EV-scored randomness: a single draw can't confirm the engine (strategy design: random effects = expected value)
 RANDOM_JOKERS = {"Misprint", "Bloodstone", "Space Joker"}
@@ -136,9 +137,8 @@ def format_report(r):
     return "\n".join(lines)
 
 
-def latest_run():
-    from .live import RUNS
-    runs = sorted(p for p in RUNS.glob("*") if (p / "moves.jsonl").exists())
+def latest_run(base=None):
+    runs = sorted(p for p in Path(base or RUNS).glob("*") if (p / "moves.jsonl").exists())
     return runs[-1] if runs else None
 
 
@@ -155,11 +155,8 @@ def run(path=None, save=True):
     return text
 
 
-ROOT = Path(__file__).resolve().parent.parent
 LEARNINGS = Path.home() / ".local/share/balatro/learnings.md"  # hypotheses carried from run to run
 MODEL = "claude-opus-5-5"
-from .checks import modules
-
 TESTS = modules(core=True)
 TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"] + [f"Bash(.venv/bin/python -m tests.{t})" for t in TESTS]
 
@@ -254,6 +251,18 @@ def _workspace(run):
     return work
 
 
+def _failing(python, cwd, timeout):
+    """Test modules that fail (non-zero exit or timeout) when run with `python` in `cwd`."""
+    failed = []
+    for t in TESTS:
+        try:
+            if subprocess.run([python, "-m", f"tests.{t}"], cwd=cwd, capture_output=True, timeout=timeout).returncode:
+                failed.append(t)
+        except subprocess.TimeoutExpired:
+            failed.append(f"{t} (timeout)")
+    return failed
+
+
 def improve(path=None):
     """Run -> Opus works on a copy -> run/opus.md (report) + run/opus.patch (tested diff). -> short status text."""
     if not TESTS:
@@ -277,8 +286,7 @@ def improve(path=None):
                             ":(exclude)_learn"], cwd=work, capture_output=True,
                            text=True, check=True).stdout
     # don't trust Opus's own test claim: re-run the suite on its result
-    failed = [t for t in TESTS if subprocess.run([".venv/bin/python", "-m", f"tests.{t}"], cwd=work,
-                                                  capture_output=True, timeout=600).returncode]
+    failed = _failing(".venv/bin/python", work, 600)
     verdict = "Tests: all green" if not failed else "Tests RED: " + ", ".join(failed)
     (rd / "opus.md").write_text(f"{answer}\n\n---\nRe-check: {verdict}\n")
     (rd / "opus.patch").write_text(patch)
@@ -298,12 +306,11 @@ def apply(name, root=ROOT):
     docs/CHANGELOG.md entry; a red suite rolls the patch back. name: run name or directory."""
     if not TESTS:
         return "Autolearner requires the project checkout with its test suite."
-    from .live import RUNS
     rd = Path(name) if Path(name).is_dir() else RUNS / name
     patch = rd / "opus.patch"
     if not patch.exists() or not patch.read_text().strip():
         return f"No patch for {rd.name}."
-    files = sorted({l[6:] for l in patch.read_text().splitlines() if l.startswith(("+++ b/", "--- a/"))})
+    files = sorted({line[6:] for line in patch.read_text().splitlines() if line.startswith(("+++ b/", "--- a/"))})
     log = root / "docs" / "CHANGELOG.md"
     paths = sorted(set(files + [str(log.relative_to(root))]))
     dirty = subprocess.run(["git", "status", "--porcelain", "--", *paths], cwd=root,
@@ -315,8 +322,7 @@ def apply(name, root=ROOT):
     if r.returncode:
         return "Patch no longer applies (not taken):\n" + r.stderr.strip()
     try:
-        failed = [t for t in TESTS if subprocess.run([sys.executable, "-m", f"tests.{t}"], cwd=root,
-                                                      capture_output=True, timeout=180).returncode]
+        failed = _failing(sys.executable, root, 180)
         if failed:
             raise RuntimeError("red in the project: " + ", ".join(failed))
         report = (rd / "opus.md").read_text() if (rd / "opus.md").exists() else ""

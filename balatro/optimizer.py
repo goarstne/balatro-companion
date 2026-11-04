@@ -494,10 +494,10 @@ def _discard_candidates(state, plays):
                  if not c.stone and not c.debuff and c.rank == 11])
         elif j.name == "Trading Card":
             for i in range(n):
-                drop("Trading Card: Einzelkarte entfernen", [i])
+                drop("Trading Card: remove a single card", [i])
         elif j.name == "Burnt Joker":
             for idx, r in plays:
-                drop(f"Burnt Joker: {r.hand_type} aufwerten", idx)
+                drop(f"Burnt Joker: level up {r.hand_type}", idx)
 
     for idx, r in plays:  # keep the scoring cards of each top play
         add(f"keep {r.hand_type}", set(r.scoring_idx or idx))

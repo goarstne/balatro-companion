@@ -60,13 +60,14 @@ class Offer:
     why: str
     buyable: bool = True
     idx: int = -1  # position in the items list
+    gain: float | None = None  # simulated relative score gain per hand (jokers); None = not simulated
 
 
 @dataclass
 class ShopAction:
     kind: str    # "buy" | "sell" | "reroll" | "leave"
-    index: int   # buy: Index in items; sell: Index in state.jokers; sonst -1
-    why: str     # deutsch, kurz
+    index: int   # buy: Index in items; sell: Index in state.jokers; else -1
+    why: str     # short reason
 
 
 def consumable_slots(state):
@@ -75,6 +76,20 @@ def consumable_slots(state):
 
 def _sim_state(state):
     return replace(state, hand=[], blind=None, blind_chips=0, score=0, deck=None, hands_left=4)
+
+
+def sample_hands(state, samples, seed=0):
+    """Random hands (hand_size cards) from the full known deck: the shared sample all offers are scored on."""
+    rng = random.Random(seed)
+    deck = state.get_full_deck()
+    return [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(samples)]
+
+
+def no_gain(offer):
+    """Does the simulation show no score gain for this joker offer? (gain rounds to 0 % or less)"""
+    if offer.gain is not None:
+        return round(offer.gain * 100) <= 0
+    return "now +0%" in offer.why or "now -" in offer.why  # offers built without a simulated gain
 
 
 def _avg_best(state, hands):
@@ -114,9 +129,7 @@ def default_price(item):
 def evaluate(state, items, samples=40, seed=0, auto=False):
     """items: [{"kind","name","price","edition"}] -> Offers sorted by value.
     auto: the autopilot plays it - jokers keep the order they are bought in."""
-    rng = random.Random(seed)
-    deck = state.get_full_deck()
-    hands = [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(samples)]
+    hands = sample_hands(state, samples, seed)
     base_state = _sim_state(state)
     base = _avg_best(base_state, hands) or 1
     free = state.joker_slots - len(state.jokers)
@@ -142,7 +155,7 @@ def evaluate(state, items, samples=40, seed=0, auto=False):
                 value, why = value - 3, why + ", rental (−$3/round)"
             if it.get("perishable"):
                 value, why = value - 1.5, why + ", perishable (5 rounds)"
-            out.append(Offer(kind, name, price, value, why + ("" if fits else ", no free slot"), fits, i))
+            out.append(Offer(kind, name, price, value, why + ("" if fits else ", no free slot"), fits, i, gain))
         elif kind == "planet" and name in PLANETS:
             fits_c = free_cons > 0
             hand = PLANETS[name]
@@ -197,7 +210,7 @@ def _owned_joker_value(state, idx, ante, hands):
 def _helps_score(state, offer):
     from . import strategy
     if offer.kind == "joker":
-        has_gain = "now +0%" not in offer.why and "now -" not in offer.why
+        has_gain = not no_gain(offer)
         fast_scale = {"Ride the Bus", "Green Joker", "Runner", "Square Joker", "Spare Trousers",
                       "Wee Joker", "Hiker", "Supernova", "Castle", "Constellation", "Hologram", "Madness"}
         return has_gain or offer.name in fast_scale or offer.name in {"Four Fingers", "Shortcut", "Smeared Joker"}
@@ -324,9 +337,8 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
     money = sim.money
     free = sim.joker_slots - len(sim.jokers)
     free_cons = max(0, consumable_slots(sim) - len(sim.consumables))
-    rng = random.Random(0)
     deck = sim.get_full_deck()
-    hands = [rng.sample(deck, min(sim.hand_size, len(deck))) for _ in range(max(10, samples))]
+    hands = sample_hands(sim, max(10, samples))
 
     # Map current sim.jokers back to their original index in state.jokers
     # ponytail: greedy single-pass over sorted offers; full knapsack unnecessary for <=7 shop items
@@ -464,9 +476,9 @@ def shop_plan(state, items, ante, reroll_cost=None, samples=40, auto=False) -> l
             money -= reroll_cost
             actions.append(ShopAction("reroll", -1, f"Reroll (${reroll_cost}): {goal}"))
 
-    zins = strategy.interest_of(money, sim)
-    leave_why = (f"leave the shop (${money} left → ${zins} interest)" if actions
-                 else f"keep the money for interest (${money} → ${zins} interest)" if zins
+    interest = strategy.interest_of(money, sim)
+    leave_why = (f"leave the shop (${money} left → ${interest} interest)" if actions
+                 else f"keep the money for interest (${money} → ${interest} interest)" if interest
                  else f"nothing worthwhile affordable (${money}, no interest below $5)")
     actions.append(ShopAction("leave", -1, leave_why))
     return actions

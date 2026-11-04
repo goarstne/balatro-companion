@@ -114,4 +114,4 @@ def download(force=False):
 if __name__ == "__main__":
     miss = download(force="--force" in sys.argv)
     if miss:
-        print("Fehlend:", ", ".join(miss))
+        print("Missing:", ", ".join(miss))

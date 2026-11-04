@@ -26,7 +26,7 @@ def load_state_dict(path, save=None):
     print(text, file=sys.stderr)
     if save:
         Path(save).write_text(text + "\n")
-        print(f"Gespeichert: {save}", file=sys.stderr)
+        print(f"Saved: {save}", file=sys.stderr)
     return d
 
 
@@ -35,12 +35,13 @@ def cmd_analyze(a):
     d = load_state_dict(a.state, a.save_state)
     if d.get("phase") in ("shop", "booster_pack") and not a.json:
         from .live import advice
-        return print(advice(d))
+        print(advice(d))
+        return
     state = State.from_dict(d)
     kw = {"samples": a.samples} if a.samples else {}
     rec = recommend(state, **kw)
     if a.json:
-        print(json.dumps(rec if isinstance(rec, dict) else asdict(rec), indent=2, ensure_ascii=False, default=str))
+        print(json.dumps(asdict(rec), indent=2, ensure_ascii=False, default=str))
     else:
         print(format_recommendation(rec))
 
@@ -68,11 +69,11 @@ def cmd_joker(a):
     s = J.REGISTRY[name]
     print(f"{s.name}  [{s.rarity}, ${s.cost}]\n{s.desc}")
     if s.defaults:
-        print("Standardwerte:", s.defaults)
+        print("Defaults:", s.defaults)
     if not s.blueprint_compat:
         print("Not Blueprint-compatible")
     if s.notes:
-        print("Hinweise:", s.notes)
+        print("Notes:", s.notes)
 
 
 def cmd_jokers(a):
@@ -83,7 +84,8 @@ def cmd_jokers(a):
 def cmd_learn(a):
     from . import learn
     if a.apply:
-        return print(learn.apply(a.apply))
+        print(learn.apply(a.apply))
+        return
     print(learn.run(a.run, not a.no_save))
     if a.improve:
         print("Claude Opus is working (may take 10–30 min) …", flush=True)
@@ -117,6 +119,26 @@ def cmd_forecast(a):
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def cmd_inspect(a):
+    from .inspect import serve
+    serve(a.runs, a.port, not a.no_browser)
+
+
+def cmd_control(a):
+    from .control import request
+    print(json.dumps(request(a.action)))
+
+
+def cmd_prune(a):
+    from .runs import prune
+    print(json.dumps(prune(a.runs, a.days, a.apply), indent=2))
+
+
+def cmd_live(a):
+    from .live import run
+    run(a)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="python -m balatro", description="Balatro score engine, advisor and autopilot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -145,10 +167,10 @@ def main(argv=None):
     s.add_argument("--runs", type=Path, default=RUNS)
     s.add_argument("--port", type=int, default=0)
     s.add_argument("--no-browser", action="store_true")
-    s.set_defaults(fn=lambda a: __import__("balatro.inspect", fromlist=["serve"]).serve(a.runs, a.port, not a.no_browser))
+    s.set_defaults(fn=cmd_inspect)
     s = sub.add_parser("control", help="pause, resume, or single-step a running autopilot")
     s.add_argument("action", choices=["pause", "resume", "step", "status"])
-    s.set_defaults(fn=lambda a: print(json.dumps(__import__("balatro.control", fromlist=["request"]).request(a.action))))
+    s.set_defaults(fn=cmd_control)
     s = sub.add_parser("stats", help="run outcomes, failures and version comparisons")
     s.add_argument("--runs", type=Path, default=RUNS)
     s.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"), help="compare versions on matching seed/stake/deck")
@@ -157,7 +179,7 @@ def main(argv=None):
     s.add_argument("--runs", type=Path, default=RUNS)
     s.add_argument("--days", type=int, default=30)
     s.add_argument("--apply", action="store_true", help="delete the listed artifacts; keep logs and error evidence")
-    s.set_defaults(fn=lambda a: print(json.dumps(__import__("balatro.runs", fromlist=["prune"]).prune(a.runs, a.days, a.apply), indent=2)))
+    s.set_defaults(fn=cmd_prune)
     s = sub.add_parser("benchmark", help="compare this checkout with a Git revision on fixed snapshots")
     s.add_argument("revision")
     s.add_argument("paths", nargs="+", help="JSON snapshots or run directories/moves.jsonl")
@@ -187,7 +209,7 @@ def main(argv=None):
     s.add_argument("--retain-days", type=int, default=30, help="trim old routine images/work copies on auto startup (default 30; 0 disables)")
     s.add_argument("--hud", action="store_true", help="movable Quickshell widget (advice only, no autopilot)")
     s.add_argument("--no-improve", action="store_true", help="don't start an Opus improvement after a lost run")
-    s.set_defaults(fn=lambda a: __import__("balatro.live", fromlist=["run"]).run(a))
+    s.set_defaults(fn=cmd_live)
     a = p.parse_args(argv)
     if getattr(a, "samples", None) is not None and not 1 <= a.samples <= 10000:
         p.error("--samples must be between 1 and 10000")

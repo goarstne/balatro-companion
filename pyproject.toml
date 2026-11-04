@@ -18,3 +18,7 @@ packages = ["balatro", "balatro.jokers", "balatro.localvision", "balatro.ui"]
 
 [tool.setuptools.package-data]
 balatro = ["ui/*.qml", "ui/*.html"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "B"]  # pyflakes, syntax errors, bugbear
+ignore = ["B905"]          # zip() without strict=: lengths are checked where it matters

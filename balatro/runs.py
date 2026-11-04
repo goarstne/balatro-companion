@@ -151,5 +151,8 @@ def prune(base=RUNS, days=30, apply=False):
                if p.is_dir() else p.stat().st_size for p in candidates)
     if apply:
         for path in candidates:
-            shutil.rmtree(path) if path.is_dir() else path.unlink()
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
     return {"applied": apply, "bytes": size, "paths": [str(p) for p in candidates]}

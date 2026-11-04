@@ -1,6 +1,6 @@
 """Run-level strategy: blind requirements, hand focus, skip/play, shop weighting, economy, selling.
 
-Heuristics summarise community guides and docs/BALATRO_STRATEGIEN_RECHERCHE.md. Texts for the user are German.
+Heuristics summarise community guides and docs/STRATEGY.md. Texts for the user are English.
 """
 import math
 import random
@@ -11,7 +11,7 @@ from .engine import most_played
 from .jokers import get as get_joker
 from .models import State
 from .optimizer import _best_score
-from .shop import TIER, TIER_POINTS, consumable_slots
+from .shop import TIER, TIER_POINTS, consumable_slots, no_gain, sample_hands
 
 # https://balatrowiki.org/w/Blinds_and_Antes & Stakes (section 12.2)
 ANTE_BASE = [300, 800, 2000, 5000, 11000, 20000, 35000, 50000]
@@ -115,9 +115,7 @@ SKIP_SAFETY = 1.2
 
 def leaf_sale(state, ante=8):
     from .shop import _owned_joker_value
-    rng = random.Random(0)
-    deck = state.get_full_deck()
-    hands = [rng.sample(deck, min(state.hand_size, len(deck))) for _ in range(8)]
+    hands = sample_hands(state, 8)
     return min((i for i, j in enumerate(state.jokers) if not j.eternal),
                key=lambda i: _owned_joker_value(state, i, ante, hands), default=None)
 
@@ -147,10 +145,8 @@ def boss_state(state, boss):
 
 def estimate_round(state, samples=20, seed=0, boss=None):
     """Rough round score: avg best single hand from random draws x hands per round (no discards)."""
-    rng = random.Random(seed)
     sim = boss_state(state, boss) if boss else replace(state, blind=None, blind_chips=0, score=0, deck=None)
-    deck = sim.get_full_deck()
-    hands = [rng.sample(deck, min(sim.hand_size, len(deck))) for _ in range(samples)]
+    hands = sample_hands(sim, samples, seed)
     return (sum(_best_score(replace(sim, hand=h)) for h in hands) / samples) * max(1, sim.hands_left or 4)  # shortcut: cheap estimate ignores redraws; use boss_forecast for full rounds.
 
 
@@ -296,7 +292,7 @@ ROLE_BONUS = {
     "mid": {"flat": 0, "econ": 0.5, "scaling": 2, "xmult": 1},
     "late": {"flat": -2, "econ": -2, "scaling": 0, "xmult": 3},
 }
-ROLE_DE = {"flat": "flat mult/chips joker", "econ": "economy joker", "scaling": "scaling joker", "xmult": "xMult joker"}
+ROLE_LABEL = {"flat": "flat mult/chips joker", "econ": "economy joker", "scaling": "scaling joker", "xmult": "xMult joker"}
 
 
 def joker_role(name):
@@ -443,14 +439,13 @@ def adjust_offers(state, offers, ante):
         elif o.kind == "joker":
             role = joker_role(o.name)
             # Duo/Trio/Family/Order/Tribe only fire on their hand: off-focus and +0% now -> rate as Tier C
-            if (o.name in HAND_XMULT and o.name not in HAND_JOKERS.get(focus, ())
-                    and ("now +0%" in o.why or "now -" in o.why)):
+            if o.name in HAND_XMULT and o.name not in HAND_JOKERS.get(focus, ()) and no_gain(o):
                 role = None
                 delta = TIER_POINTS["C"] - TIER_POINTS[TIER.get(o.name, "C")]
                 notes.append(f"condition doesn't fit focus hand {focus}")
             if role:
                 delta += ROLE_BONUS[phase][role]
-                notes.append(f"{ROLE_DE[role]}, {phase} phase")
+                notes.append(f"{ROLE_LABEL[role]}, {phase} phase")
             if o.name in HAND_JOKERS.get(focus, ()):
                 delta, notes = delta + 2, notes + [f"fits focus hand {focus}"]
             syn_d, syn_notes = joker_synergy(state, o.name, ante)

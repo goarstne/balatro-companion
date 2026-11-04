@@ -1,4 +1,5 @@
 """Loopback-only replay and what-if editor. Uses the standard library; never writes edited states to runs."""
+import contextlib
 import json
 import secrets
 import threading
@@ -60,12 +61,11 @@ def analyze(raw, indices=None, selection_only=False):
         if selected is None:
             raise ValueError("Select at least one card")
         return {"selected": selected}
+    details = {}
     if state.hand and raw.get("phase", "playing") == "playing":
         rec = recommend(state, samples=16)
         text = format_recommendation(rec)
-        details = {}
     else:
-        details = {}
         text, rec = plan(raw, details=details)
     out = model(raw, text, rec, details)
     if selected:
@@ -186,7 +186,5 @@ def serve(base=RUNS, port=0, browser=True):
         print(f"Replay and what-if editor: {server.url}\nCtrl+C stops the local server.", flush=True)
         if browser:
             threading.Timer(0.3, lambda: webbrowser.open(server.url)).start()
-        try:
+        with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
-        except KeyboardInterrupt:
-            pass

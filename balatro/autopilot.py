@@ -153,6 +153,11 @@ def _pack_choice(state, b):
 
 
 class Autopilot:
+    # class-level defaults: live.py replaces `allowed` with Control.poll; tests build instances without __init__
+    allowed = staticmethod(lambda: True)  # False while the user has paused the autopilot
+    focused = False
+    boss_suit = None
+
     def __init__(self, grab_fn, settle=1.0):
         """grab_fn() -> (geom, BGR image) of the game window, or None."""
         self.grab, self.settle, self.ptr, self.focus = grab_fn, settle, Pointer(), focus_window_at
@@ -169,14 +174,14 @@ class Autopilot:
         return Screen(geom, img), normalize(img)
 
     def click(self, scr, fx, fy):
-        if not getattr(self, "allowed", lambda: True)():
+        if not self.allowed():
             raise RuntimeError("Autopilot paused before click")
-        if not getattr(self, "focused", False):  # once per act(): the window doesn't change between clicks
+        if not self.focused:  # once per act(): the window doesn't change between clicks
             if self.focus(*scr.point(fx, fy)):  # unfocused: the click would be swallowed; focusing may shift it
                 time.sleep(0.4)
                 scr = self._screen()[0]
             self.focused = True
-        if not getattr(self, "allowed", lambda: True)():
+        if not self.allowed():
             raise RuntimeError("Autopilot paused before click")
         self.ptr.click(*scr.point(fx, fy))
 
@@ -186,7 +191,7 @@ class Autopilot:
         self.ptr.nudge()  # without a motion event the game keeps the last card's hover tooltip
 
     def act(self, d, rec, details=None):
-        """Carry out the recommendation for recognised state d. -> (done, short German status)."""
+        """Carry out the recommendation for recognised state d. -> (done, short status text)."""
         phase = d.get("phase")
         self.focused = False
         if phase != "shop":
@@ -257,15 +262,10 @@ class Autopilot:
             while True:
                 tel_state = decode_strip(canvas)
                 observed = tel_state[0] if tel_state else {}
-                ready = observed.get("cash_out_ready")
-                if ready:
-                    pos = cash_out_button(canvas)
-                    if pos:
-                        break
-                # Old hooks: wait until the actual orange Cash Out button is visible.
-                pos = cash_out_button(canvas) if ready is None else None
+                ready = observed.get("cash_out_ready")  # False: the payout still runs; None: old hook
+                pos = cash_out_button(canvas) if ready or ready is None else None
                 if pos:
-                    break
+                    break  # either way only the actually visible orange Cash Out button counts
                 if time.monotonic() >= end:
                     return False, "Cash Out is not ready yet"
                 time.sleep(0.2)
@@ -351,7 +351,7 @@ class Autopilot:
         return None
 
     def _matches(self, hand, expect):
-        boss_suit = getattr(self, "boss_suit", None)
+        boss_suit = self.boss_suit
         for c in hand:  # same correction as recognize_local: the boss fixes a debuffed card's suit
             if boss_suit and c.get("debuff") and "highlighted" not in c:  # telemetry cards: exact suit
                 c["suit"] = boss_suit
@@ -386,7 +386,7 @@ class Autopilot:
             self.focused = True
             intermediate = original[:]
             intermediate.insert(destination, intermediate.pop(source))
-            if not getattr(self, "allowed", lambda: True)():
+            if not self.allowed():
                 return False, "Autopilot paused before drag"
             self.ptr.drag(scr.point(*cards[source]["pos"]), scr.point(*cards[destination]["pos"]))
             self.park(scr)

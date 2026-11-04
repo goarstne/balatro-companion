@@ -124,22 +124,22 @@ def normalize(raw):
     for j in raw.get("jokers", []):
         name = _closest(j["name"], JOKER_NAMES)
         if name is None:
-            notes.append(f"Unbekannter Joker '{j['name']}' verworfen")
+            notes.append(f"Unknown joker '{j['name']}' discarded")
             continue
         if name != j["name"]:
-            notes.append(f"Joker '{j['name']}' als '{name}' interpretiert")
+            notes.append(f"Joker '{j['name']}' read as '{name}'")
         jokers.append({k: v for k, v in {**j, "name": name}.items() if v not in (None, False)})
     d["jokers"] = jokers
     if d.get("blind"):
         b = _closest(d["blind"], BLINDS)
         if b != d["blind"]:
-            notes.append(f"Blind '{d['blind']}' als '{b}' interpretiert")
+            notes.append(f"Blind '{d['blind']}' read as '{b}'")
         d["blind"] = b
     for item in d.get("shop", []):
         if item["kind"] == "joker":
             name = _closest(item["name"], JOKER_NAMES)
             if name and name != item["name"]:
-                notes.append(f"Shop-Joker '{item['name']}' als '{name}' interpretiert")
+                notes.append(f"Shop-Joker '{item['name']}' read as '{name}'")
             item["name"] = name or item["name"]
     d["notes"] = notes
     return d
@@ -150,7 +150,7 @@ def state_from_screenshot(path, model="claude-opus-5-5"):
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set - screenshot recognition via the API is not possible.\n"
-            "Alternativen:\n"
+            "Alternatives:\n"
             "  1. Show the screenshot in Claude Code and ask 'what should I play?' (skill 'balatro'):\n"
             "     Claude reads the image itself and writes state.json.\n"
             "  2. write state.json by hand (see examples/) and\n"

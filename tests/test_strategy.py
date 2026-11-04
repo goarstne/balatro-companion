@@ -543,6 +543,28 @@ def test_vampire_needs_enhanced_cards():
     assert [a.kind for a in plan[:2]] == ["sell", "buy"] and plan[1].index == 1, plan
 
 
+def test_no_gain_uses_the_simulated_gain():
+    """Decisions read Offer.gain, not the display text; offers without a gain fall back to the text."""
+    from balatro.shop import no_gain
+    def offer(gain, why="x"):
+        return Offer("joker", "Joker", 4, 5.0, why, gain=gain)
+    assert no_gain(offer(0.0)) and no_gain(offer(-0.2)) and no_gain(offer(0.004))
+    assert not no_gain(offer(0.006)) and not no_gain(offer(0.3, "now +0%"))  # the number wins over the text
+    assert no_gain(offer(None, "Tier C, now +0% score/hand")) and no_gain(offer(None, "Tier C, now -3% score/hand"))
+    assert not no_gain(offer(None, "Tier C, now +12% score/hand"))
+    s = State(hand=[], money=10)
+    j = next(o for o in evaluate(s, [{"kind": "joker", "name": "Joker", "price": 2}], samples=5))
+    assert j.gain is not None  # evaluate() records the simulated gain
+
+
+def test_sample_hands_is_deterministic_and_sized():
+    from balatro.shop import sample_hands
+    s = State(hand=[], hand_size=7)
+    a, b = sample_hands(s, 5), sample_hands(s, 5)
+    assert a == b and len(a) == 5 and all(len(h) == 7 for h in a)
+    assert sample_hands(s, 5, seed=1) != a
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -134,6 +134,11 @@ def main():
     assert hit is not None and abs(hit[0] - 0.3738) < 0.01 and abs(hit[1] - 0.72) < 0.01, hit
     assert autopilot.button_near(sel, (SELECT_COLS[2] / REF_W + autopilot.SKIP_D[0], autopilot.SKIP_D[1]),
                                  ("red",)) is None  # the boss has no Skip
+    # instances built without __init__ (as here) get safe defaults instead of getattr workarounds
+    bare = Autopilot.__new__(Autopilot)
+    assert bare.allowed() is True and bare.focused is False and bare.boss_suit is None
+    bare.allowed = lambda: False
+    assert bare.allowed() is False and Autopilot.allowed() is True  # the override stays per instance
     print("autopilot actions ok")
 
 
