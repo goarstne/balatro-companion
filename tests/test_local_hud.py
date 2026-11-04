@@ -14,6 +14,9 @@ CONFIDENT = 0.8
 
 
 def main():
+    if not any(DATASET.glob("*.png")):
+        print("skipped (no local screenshot dataset)")
+        return
     stats = {f: [0, 0, 0] for f in FIELDS}  # labelled & confident, correct among those, labelled total
     times = []
     for png in sorted(DATASET.glob("*.png")):

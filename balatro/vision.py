@@ -191,8 +191,8 @@ def state_via_claude_cli(path, model="sonnet", timeout=180):
     out = subprocess.run(cmd, cwd=p.parent, capture_output=True, text=True, timeout=timeout)
     try:
         d = json.loads(out.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude -p failed (exit {out.returncode}): {(out.stderr or out.stdout)[-500:]}")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"claude -p failed (exit {out.returncode}): {(out.stderr or out.stdout)[-500:]}") from e
     if d.get("is_error") or not d.get("structured_output"):
         raise RuntimeError(f"claude -p returned no state: {str(d.get('result'))[:500]}")
     return normalize(d["structured_output"])

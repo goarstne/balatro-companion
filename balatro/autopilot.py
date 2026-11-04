@@ -390,8 +390,8 @@ class Autopilot:
                 return False, "Autopilot paused before drag"
             self.ptr.drag(scr.point(*cards[source]["pos"]), scr.point(*cards[destination]["pos"]))
             self.park(scr)
-            if self._confirm(lambda t: t.get("phase") == d.get("phase") and
-                             [key(c) for c in t.get(area, [])] == intermediate, timeout=5) is not True:
+            if self._confirm(lambda t, want=intermediate: t.get("phase") == d.get("phase") and
+                             [key(c) for c in t.get(area, [])] == want, timeout=5) is not True:
                 return False, "Drag order was not confirmed; nothing played"
             original = intermediate
             _, canvas = self._screen()
@@ -482,7 +482,7 @@ class Autopilot:
         """Use the first held planet/tarot packs.use_consumable wants used now (tarot targets need the hand,
         so those only while playing). -> (done, status) or None if nothing to use."""
         state = State.from_dict(d)
-        for i, c in enumerate(d["consumable_items"]):
+        for c in d["consumable_items"]:
             choice = use_consumable(state, c["name"], c["kind"])
             if choice.index != 0 or (choice.targets and phase != "playing"):
                 continue
@@ -498,7 +498,7 @@ class Autopilot:
             if not self._press(scr, c["pos"], USE_D[1], USE_D[0], "red"):
                 return False, f"USE button for {c['name']} not found"
             n = len(d["consumable_items"])
-            if self._confirm(lambda t: len(t.get("consumables", [])) < n, telemetry=bool(d.get("telemetry"))) is False:
+            if self._confirm(lambda t, n=n: len(t.get("consumables", [])) < n, telemetry=bool(d.get("telemetry"))) is False:
                 return False, f"using {c['name']} had no visible effect"
             return True, f"Used: {c['name']} – {choice.why}"
         return None

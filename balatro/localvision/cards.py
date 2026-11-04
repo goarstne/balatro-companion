@@ -209,7 +209,7 @@ def _read_tilted(ink, sharp, img, x, y, scale, stripes, corner, angles=(-6, -3, 
     for a in angles:
         M = cv2.getRotationMatrix2D((x + tw / 2, y + th / 2), a, 1)
 
-        def rot(im, interp=cv2.INTER_LINEAR):
+        def rot(im, interp=cv2.INTER_LINEAR, M=M):
             return cv2.warpAffine(im, M, im.shape[1::-1], flags=interp, borderMode=cv2.BORDER_REPLICATE)
         r = _read_corner(rot(ink), rot(sharp), rot(img), x, y, scale,
                          rot(stripes.astype(np.uint8), cv2.INTER_NEAREST).astype(bool))
